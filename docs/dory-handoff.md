@@ -5,11 +5,12 @@ Read this once, then act. Nothing here is a plan; it is the measured state as of
 
 ## What is true now (verified, not remembered)
 
-1. **An upstream PR is already open:** ggml-org/llama.cpp#32963 for the two
-   orphaned `LLM_TENSOR_POST_ATTN_NORM` / `POST_MLP_NORM` enums (dead enum members
-   with no name row, landed by a vendored squash). Branch `darkhipo:enum-names`
-   off current origin/master, 1 file, +2 lines, body at
-   `/private/tmp/enum-pr/PR_BODY.md`. Do not duplicate that PR.
+1. **Upstream contribution is CLOSED and excluded:** ggml-org/llama.cpp#32963
+   and #32970 were closed politely on 2026-11-24 after the repository's AI
+   contribution rules were checked. No open PRs remain. Those rules require
+   human-authored posts and prohibit autonomous-agent and automated submissions,
+   so MultiAgency's standing policy forbids reopening them or creating any new
+   upstream PR, issue, or review comment. Continue only in this private fork.
 2. **The dory port builds and RUNS** in `~/llama.cpp` on branch `dory-arch`:
    `src/models/dory.cpp` (490 lines) plus registration and
    `graph_nodes_per_tensor() = 32`. `llama-cli` and `llama-server` both load it:
@@ -85,12 +86,14 @@ D. **llama-cli `--emit-token-ids`** (entry 2125613507) is being written by an
 
 ## Successor result, measured 2026-11-24 after the rebase
 
-The upstream dory PR is **ggml-org/llama.cpp#32970**, OPEN:
-https://github.com/ggml-org/llama.cpp/pull/32970 . The upstream
-`convert-to-draft` workflow has since marked it draft. Its branch is
-`darkhipo:dory-arch`; the initial pushed head `e0a67bbac` was compared equal to
-the remote, and later handoff commits were pushed to the same PR. The older
-enum-only PR #32963 remains separate and unmerged.
+The upstream dory PR was **ggml-org/llama.cpp#32970**:
+https://github.com/ggml-org/llama.cpp/pull/32970 . It and the separate enum-only
+PR #32963 are now CLOSED and unmerged. Both received the repository's AI-content
+warning and were closed politely on 2026-11-24 with "will take the work
+elsewhere". The `darkhipo:dory-arch` and `darkhipo:enum-names` branches remain
+available for private use only. Do not reopen either PR or create another
+upstream contribution; MultiAgency's `AGENTS.md` names this repository as a
+verified human-in-the-loop exclusion.
 
 A. Converter is landed in the branch. A fresh conversion of the BF16 checkpoint
 completed with exit 0 in 130.65 s and produced
