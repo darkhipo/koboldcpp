@@ -10,7 +10,8 @@ Read this once, then act. Nothing here is a plan; it is the measured state as of
    contribution rules were checked. No open PRs remain. Those rules require
    human-authored posts and prohibit autonomous-agent and automated submissions,
    so MultiAgency's standing policy forbids reopening them or creating any new
-   upstream PR, issue, or review comment. Continue only in this private fork.
+   upstream PR, issue, or review comment. Continue in our own non-gating fork,
+   public or private; a third-party fork requires its own rules check.
 2. **The dory port builds and RUNS** in `~/llama.cpp` on branch `dory-arch`:
    `src/models/dory.cpp` (490 lines) plus registration and
    `graph_nodes_per_tensor() = 32`. `llama-cli` and `llama-server` both load it:
@@ -91,9 +92,10 @@ https://github.com/ggml-org/llama.cpp/pull/32970 . It and the separate enum-only
 PR #32963 are now CLOSED and unmerged. Both received the repository's AI-content
 warning and were closed politely on 2026-11-24 with "will take the work
 elsewhere". The `darkhipo:dory-arch` and `darkhipo:enum-names` branches remain
-available for private use only. Do not reopen either PR or create another
-upstream contribution; MultiAgency's `AGENTS.md` names this repository as a
-verified human-in-the-loop exclusion.
+available in our own non-gating fork, public or private. Do not reopen either PR
+or create another upstream contribution; MultiAgency's `AGENTS.md` names this
+repository as a verified human-in-the-loop exclusion. A third-party fork
+requires its own rules check first.
 
 A. Converter is landed in the branch. A fresh conversion of the BF16 checkpoint
 completed with exit 0 in 130.65 s and produced
