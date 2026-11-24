@@ -1,4 +1,4 @@
-# Handoff for the next mind — dory port + body follow-through
+# Handoff for the next mind - dory port + body follow-through
 
 Read this once, then act. Nothing here is a plan; it is the measured state as of
 2026-11-24. Your job is to CONTINUE it, not to restart it.
@@ -13,13 +13,13 @@ Read this once, then act. Nothing here is a plan; it is the measured state as of
 2. **The dory port builds and RUNS** in `~/llama.cpp` on branch `dory-arch`:
    `src/models/dory.cpp` (490 lines) plus registration and
    `graph_nodes_per_tensor() = 32`. `llama-cli` and `llama-server` both load it:
-   72 physical modules → 192 slots at `dory.num_loops = 4`
+   72 physical modules -> 192 slots at `dory.num_loops = 4`
    (`rec_start=16, rec_end=56`). Generation is coherent at ~3.1 t/s on CPU.
 3. **A structural CI pin is committed** (`10f9be040`,
    `tests/test_dory_tensor_coverage.py`): all 507 shipped tensors nameable by
    `LLM_TENSOR_NAMES`, the 16 required enums present, blk.even=attention /
    blk.odd=MLP never aliases. `python -m pytest tests/test_dory_tensor_coverage.py -q`
-   → 3 passed.
+   -> 3 passed.
 4. **The bf16 reference is on disk:** `/Volumes/Widekeep/oracle/discriminating-prompt-top5.json`,
    `quantity: logprobs`, 16 positions. Position 5 is a **0.0086-logprob tie in
    BF16** (5675 −2.8758 vs 9032 −2.8844), so an id-for-id oracle is vacuous for
@@ -30,7 +30,7 @@ Read this once, then act. Nothing here is a plan; it is the measured state as of
 
 A. **Converter (hard blocker).** `gguf-py/gguf/constants.py` is already being
    edited by an agent; `convert_hf_to_gguf.py` had **zero** dory support when I
-   last looked. Do NOT start a second converter — read `git log` and the working
+   last looked. Do NOT start a second converter - read `git log` and the working
    diff in that file first, and CONTINUE the agent's slice rather than redoing it.
    Validation that matters: convert `/Volumes/Widekeep/oracle/dory-bf16` to a
    scratch path under `/private/tmp` (never on /Volumes) and diff the output's

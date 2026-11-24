@@ -1,11 +1,11 @@
-# dory port — work contract for the parallel build
+# dory port - work contract for the parallel build
 
 Read `docs/dory-arch-spec.md` first: it holds the algorithm, confirmed against
 `transformers/models/dory` (not inferred from tensor shapes). This file is the
 **ownership and acceptance** contract so several agents can work at once without
 stepping on each other.
 
-## Acceptance — what "done" means (no partial credit)
+## Acceptance - what "done" means (no partial credit)
 
 A build that merely LOADS the GGUF is not done. Done is:
 
@@ -19,8 +19,8 @@ The oracle was produced by the reference implementation:
 ```
 prompt          "The capital of France is"
 prompt_ids      [1784, 8961, 1307, 5498, 1395]
-generated_ids   [6993, 1046, 1531, 8961, 1307, 10787, 1395, 10874, 15421, …] (24 total in the file)
-generated_text  " Paris. The capital of Germany is Berlin. The capital of Italy is Rome. …"
+generated_ids   [6993, 1046, 1531, 8961, 1307, 10787, 1395, 10874, 15421, ...] (24 total in the file)
+generated_text  " Paris. The capital of Germany is Berlin. The capital of Italy is Rome. ..."
 ```
 
 Model: `/Volumes/Safehold/models/dory-1.0-4b/NVIDIA-Nemotron-Labs-Dory1.0-4B-Q5_K_M.gguf`
@@ -32,17 +32,17 @@ Reference weights (for re-deriving the oracle if ever needed):
 compare text, do not accept "plausible". Report the first differing position and
 the logits you saw there.
 
-## File ownership — one owner per path, strictly
+## File ownership - one owner per path, strictly
 
 | owner | paths | notes |
 |---|---|---|
 | **A: registration** | `src/llama-arch.h`, `src/llama-arch.cpp`, `src/llama-model.cpp`, `src/llama-hparams.h`, `src/llama-hparams.cpp` | `LLM_ARCH_DORY` + name; new `LLM_TENSOR_*` enums and their name strings; `LLM_KV_*` for the `dory.*` keys; hparams fields; the dispatch case that constructs the model |
-| **B: model** | `src/models/dory.cpp` (**new file, plus its own `#include` wiring if CMake needs it — CMake globs `models/*.cpp`, so normally nothing else**) | tensor loading + the looped graph. Owns NO other file |
+| **B: model** | `src/models/dory.cpp` (**new file, plus its own `#include` wiring if CMake needs it - CMake globs `models/*.cpp`, so normally nothing else**) | tensor loading + the looped graph. Owns NO other file |
 | **C: harness** | `scripts/dory_oracle_check.sh` or `.py` (**new file**) | builds nothing; runs the binary against the oracle, prints first-divergence |
 | **D: integration** | none | runs the build, triages failures, routes them to A or B |
 
 Templates to copy from, in order of usefulness:
-`src/models/inkling2-loop.cpp` (a LOOPED arch — closest relative),
+`src/models/inkling2-loop.cpp` (a LOOPED arch - closest relative),
 `src/models/ricursive.cpp` (small, odd naming), `src/models/llama.cpp` (baseline).
 
 ## The algorithm, condensed (full text in the spec)
@@ -76,7 +76,7 @@ GGUF metadata: `dory.block_count 72`, `dory.input_layer_count 16`,
 `dory.num_loops 4`, `dory.attention.sliding_window 1024`,
 `dory.rope.freq_base 1e7`, `dory.rope.freq_base_2 1e4`,
 `dory.recurrent_kv_cache_mode per_loop`, `dory.alpha_init 0.05`.
-The HF reference halves these (72→36 etc.) because it counts attn+MLP pairs;
+The HF reference halves these (72->36 etc.) because it counts attn+MLP pairs;
 **llama.cpp sees 72 modules, so use the GGUF numbers directly.**
 
 Two `rope.freq_base`s means per-layer-type theta: sliding layers use
@@ -91,10 +91,10 @@ Two `rope.freq_base`s means per-layer-type theta: sliding layers use
 * Never claim the oracle matched unless you ran it and pasted the ids.
 * If a design decision is genuinely ambiguous (e.g. which norm applies inside
   the attention sub-block), say so and cite the line of
-  `transformers/models/dory/modeling_dory.py` — the fetched copy is at
+  `transformers/models/dory/modeling_dory.py` - the fetched copy is at
   `/tmp/modeling_dory.py` on this host.
 
-## Addendum: the codebase already has the loop idiom — use it
+## Addendum: the codebase already has the loop idiom - use it
 
 Found while prepping the model file, and it changes the design in a good way.
 `src/models/inkling2-loop.cpp` implements a LOOPED arch by modelling the loop as
@@ -124,12 +124,12 @@ Consequences for dory:
   `dory.recurrent_layer_count` (count = 40) and `dory.num_loops`; map those keys
   onto the same three fields rather than inventing parallel machinery.
 * The loop is expressed by expanding `hparams.n_layer_all` to
-  `72 + (n_loops - 1) * 40` slots and mapping slot → physical layer with the
+  `72 + (n_loops - 1) * 40` slots and mapping slot -> physical layer with the
   same modulo rule. That is what gives dory its `per_loop` KV cache: each extra
   slot owns its own cache, exactly as the reference's deep-copied caches do.
 * The graph builder therefore walks slots, not a for-loop, and the reinjection
   (`h = L2Norm(h) + input_hidden`) is the only truly novel graph op at the loop
-  boundary — plus one `L2Norm` and one interpolated-residual helper.
+  boundary - plus one `L2Norm` and one interpolated-residual helper.
 
 ## ACCEPTANCE UPDATED 2026-11-23 (supersedes the token list above)
 
@@ -138,7 +138,7 @@ The first oracle prompt turned out to be **insensitive to the loop count**:
 2 and 4, so a port that ignored the loops entirely would still have passed it.
 That is a test that cannot fail for the bug most likely to be present.
 
-**Use this instead** — `/Volumes/Widekeep/oracle/discriminating-prompt.json`,
+**Use this instead** - `/Volumes/Widekeep/oracle/discriminating-prompt.json`,
 generated by `find_discriminating_prompt.py` on the reference:
 
 ```
@@ -150,7 +150,7 @@ loops = 4   (the GGUF's dory.num_loops; the reference config default is 2)
 
 They diverge at **index 5**, so the check now discriminates: a single-pass
 implementation, a wrong reinjection, or a wrong `num_loops` read all fail here.
-Both vectors are in the JSON, so a divergence tells you WHICH way it went —
+Both vectors are in the JSON, so a divergence tells you WHICH way it went -
 `9032` means "you ran one pass", `5675` means "you ran four".
 
 Corollary for the port: read `dory.num_loops` (4) from the GGUF and use it. Do
@@ -167,8 +167,8 @@ zero `not enough space in the context's memory pool`.
 **The id-for-id oracle CANNOT be passed by a Q5_K_M port, and that is a defect
 in the test, not in the port.** The chosen "discriminating" token is a coin flip
 INSIDE the BF16 reference itself: at position 5, loops=4 scores
-`5675 = 13.493` against `9032 = 13.485` — a **0.008** margin — while the
-quantised artifact deviates from BF16 by 0.05–0.7, i.e. 6–90× the signal.
+`5675 = 13.493` against `9032 = 13.485` - a **0.008** margin - while the
+quantised artifact deviates from BF16 by 0.05–0.7, i.e. 6–90x the signal.
 Measured evidence that the port is otherwise right: `prompt_ids` match exactly;
 the top-5 at the last prompt position is the same SET in the same ORDER with
 Δ ≤ 0.6 (1032 18.233 vs 18.255; 2007 13.568 vs 13.276; 1659 13.307 vs 12.973;
@@ -193,7 +193,7 @@ a 5-bit quantisation.
    (`modeling_dory.py:377-387`), not the raw `inpL`.
 2. A module L2-norms its **own output** before interpolating
    (`post_attention_layernorm`, `post_feedforward_layernorm`), and the MLP half
-   also re-norms its input (`pre_feedforward_layernorm`) — **six norms per
+   also re-norms its input (`pre_feedforward_layernorm`) - **six norms per
    attention+MLP pair**, not two.
 3. The gate scale multiplies the DATA, then the whole product is squared:
    `sigmoid((G*(s_gate*s_gate_scale))**2)`, i.e. the SCALE is squared, not the
@@ -202,7 +202,7 @@ a 5-bit quantisation.
    which is why `build_attn` is called with `wo = nullptr` and `wo` is applied by
    hand after the norm.
 
-## The scale tensors are RAW, measured — this file said otherwise
+## The scale tensors are RAW, measured - this file said otherwise
 
 Every 1-D `*_scale` / `alpha` tensor in the GGUF is byte-identical to the raw
 reference parameter (dequantised BF16 vs `model.safetensors`, ratio 1.00000):
@@ -211,7 +211,7 @@ reference parameter (dequantised BF16 vs `model.safetensors`, ratio 1.00000):
 `mixer.suv_gate` (1.99049), `output_scale` ≡ `lm_head.logit_scale` (2.02304).
 So the PORT applies the folds itself, from `dory.init_std` (0.0177) and
 `dory.alpha_init` (0.05). The earlier claim in this file that they were
-"already the folded product" was wrong; applying the fold twice is ~4e4× off.
+"already the folded product" was wrong; applying the fold twice is ~4e4x off.
 
 ## `dory.layer_pattern` is 72 entries, one per PHYSICAL module
 
@@ -224,5 +224,5 @@ stack; the drift worth fixing is the impression that the file carries only 36.
 
 One character per ATTENTION module (`S` sliding, `*` full); physical module `2k`
 is attention module `k`, and MLP slots carry `is_swa = 0`. Cross-checked against
-`config.json`'s 72-entry `layer_types` — identical. Dual RoPE then comes free
+`config.json`'s 72-entry `layer_types` - identical. Dual RoPE then comes free
 via `is_swa` + `hparams.rope_freq_base_train_swa = dory.rope.freq_base_2`.

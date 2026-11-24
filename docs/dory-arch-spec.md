@@ -1,4 +1,4 @@
-# `dory` architecture — spec captured from the GGUF, implementation plan
+# `dory` architecture - spec captured from the GGUF, implementation plan
 
 Status: **specification only**. No forward pass yet. Branch `dory-arch` (off
 `origin/master` @ c212d25ad). Written 2026-11-23 from the shipped file
@@ -10,13 +10,13 @@ architecture PNG and `explainability.md`.
 
 ## What the model is
 
-NVIDIA **Dory1.0-4B — "Looped (latent-recurrent) normalized-GPT"**, per the
+NVIDIA **Dory1.0-4B - "Looped (latent-recurrent) normalized-GPT"**, per the
 model card:
 
-* layer stack in three groups — **Input 8 blocks / Recurrent 20 blocks (shared,
+* layer stack in three groups - **Input 8 blocks / Recurrent 20 blocks (shared,
   applied `num_loops` times) / Output 8 blocks**, input reinjected every loop;
 * interleaved **sliding-window attention (SWA)** and **full attention**;
-* nGPT backbone → learned per-layer scales (hence the `*_scale` tensors);
+* nGPT backbone -> learned per-layer scales (hence the `*_scale` tensors);
 * last-loop ("per_loop") KV caching so loop count costs no cache memory;
 * 256K context; natively NVFP4-pretrained, shipped here as Q5_K_M.
 
@@ -31,15 +31,15 @@ context_length = 262144     attention.head_count_kv = 4
 rope.dimension_count = 256  attention.key_length = 256
 rope.freq_base = 1e7        attention.value_length = 256
 rope.freq_base_2 = 1e4      attention.sliding_window = 1024
-rope.profile = [2,1,2,1, … 72 entries]
-layer_pattern = S-S-S-*-S-S-S-*-… (72 entries; S = SWA, * = full)
-alpha_init = 0.05  gate_init = 50.596…  init_std = 0.0177
+rope.profile = [2,1,2,1, ... 72 entries]
+layer_pattern = S-S-S-*-S-S-S-*-... (72 entries; S = SWA, * = full)
+alpha_init = 0.05  gate_init = 50.596...  init_std = 0.0177
 recurrent_kv_cache_mode = per_loop
 ```
 
 **The counting trap:** `block_count = 72` counts *physical* layers, and the
-tensors alternate attention / FFN — `blk.0`, `blk.2`, … carry attention,
-`blk.1`, `blk.3`, … carry FFN. The README's "8 / 20 / 8 blocks" is half of
+tensors alternate attention / FFN - `blk.0`, `blk.2`, ... carry attention,
+`blk.1`, `blk.3`, ... carry FFN. The README's "8 / 20 / 8 blocks" is half of
 16 / 40 / 16 physical layers. So the recurrent group is **40 physical layers =
 20 (attn+ffn) pairs**, applied `num_loops = 4` times.
 
@@ -70,18 +70,18 @@ Globals: `token_embd.weight [2560, 131072]`, `output.weight [2560, 131072]`,
    `dory.output_layer_count`, `dory.attention.sliding_window`,
    `dory.rope.profile`, `dory.rope.freq_base_2`,
    `dory.recurrent_kv_cache_mode`, `dory.alpha_init`, `dory.gate_init`.
-2. `src/llama-model.cpp`: a looped graph builder — build layers `[0,16)` once,
+2. `src/llama-model.cpp`: a looped graph builder - build layers `[0,16)` once,
    then the recurrent region `[16,56)` `num_loops` times with the hidden state
    reinjected (and a per-loop KV slot when `per_loop`), then `[56,72)` once.
    Interleaved attn/ffn means each physical index is one op, not a block.
-3. nGPT semantics — **the part that must be matched, not guessed**: how
+3. nGPT semantics - **the part that must be matched, not guessed**: how
    `residual_alpha` scales the residual add, the order of `attn_qk_scale`
    (pre-softmax QK normalisation) and `attn_gate_scale`, whether `ffn_*_scale`
    are applied pre- or post-activation, and the `output_scale` over the logits
    (131072 = vocab). The tensor *shapes* pin the dimensionality but not the
    order of operations.
-4. Dual RoPE: `rope.profile = [2,1,2,1,…]` over `dimension_count = 256` with two
-   base frequencies (1e7 / 1e4) is a per-dimension-pair split — this needs the
+4. Dual RoPE: `rope.profile = [2,1,2,1,...]` over `dimension_count = 256` with two
+   base frequencies (1e7 / 1e4) is a per-dimension-pair split - this needs the
    reference to confirm which pairs take which base.
 5. `llama.cpp` has no `dory`, and `origin/master` has no `dory` either (checked
    at c212d25ad); the closest existing arches are `nemotron_h` /
@@ -95,7 +95,7 @@ order can produce fluent-looking garbage. Three ways to settle it, in order of
 cost:
 
 1. **Get `config.json` + the model class** from the (gated) base repo or from
-   NVIDIA — that pins steps 3 and 4 exactly.
+   NVIDIA - that pins steps 3 and 4 exactly.
 2. **Reference logits**: run the model in its native implementation on a fixed
    prompt and store `argmax` per position; the llama.cpp port is correct when
    its logits match. This is the only mechanical proof.
@@ -103,7 +103,7 @@ cost:
    accept that the port is a hypothesis until (1) or (2) arrives.
 
 Until one of those exists, this branch carries the specification and the
-tensor/metadata mapping — deliberately not a guessed forward pass.
+tensor/metadata mapping - deliberately not a guessed forward pass.
 
 ---
 
@@ -167,13 +167,13 @@ Note the square: the qk scale and the gate scale are applied SQUARED, and the
 gate is a sigmoid of that square. Both GGUF tensors are already the folded
 product (`s* *_scale`), so the port multiplies them once and squares.
 
-MLP (`DoryMLP.forward`) — SwiGLU with a scale on EACH branch:
+MLP (`DoryMLP.forward`) - SwiGLU with a scale on EACH branch:
 ```
 gate = gate_proj(x) * (suv_gate * suv_scale)   # gguf: ffn_gate_scale[7168]
 up   = up_proj(x)   * (suv_up   * suv_scale)   # gguf: ffn_up_scale[7168]
 out  = down_proj( ffn_sub_norm( silu(gate) * up ) )
 ```
-LM head: `logits = (h @ W).float() * (logit_scale * factor)` — matches
+LM head: `logits = (h @ W).float() * (logit_scale * factor)` - matches
 `output_scale.weight [131072]`, one scalar per vocab entry.
 
 ## The loop (DoryModel.forward)
@@ -197,10 +197,10 @@ count.
 ## What this changes for the port
 
 The remaining risk is gone: op order is no longer a hypothesis. The work is now
-mechanical but large — register the arch and 17 tensor kinds, implement the two
+mechanical but large - register the arch and 17 tensor kinds, implement the two
 nGPT ops (`L2Norm`, interpolated residual with per-dim rate), one attention
 builder with the gate and squared qk scale, one scaled-SwiGLU builder, and a
 graph loop over `[16,56)` with reinjection plus the per-loop KV offset. A
 validation harness still needs reference logits from `DoryForCausalLM` on a
-fixed prompt; that is now cheap to produce (`pip install transformers>=…` with
+fixed prompt; that is now cheap to produce (`pip install transformers>=...` with
 `models/dory`, load the BF16 repo, greedy-decode 32 tokens, store token ids).
