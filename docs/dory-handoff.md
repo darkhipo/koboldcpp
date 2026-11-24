@@ -24,7 +24,7 @@ Read this once, then act. Nothing here is a plan; it is the measured state as of
    -> 3 passed.
 4. **The bf16 reference is on disk:** `/Volumes/Widekeep/oracle/discriminating-prompt-top5.json`,
    `quantity: logprobs`, 16 positions. Position 5 is a **0.0086-logprob tie in
-   BF16** (5675 −2.8758 vs 9032 −2.8844), so an id-for-id oracle is vacuous for
+   BF16** (5675 -2.8758 vs 9032 -2.8844), so an id-for-id oracle is vacuous for
    Q5_K_M. The useful discriminator is **aggregate loop agreement**: BF16 itself
    is 16/16 argmax-equal to `ids_loops4` and 5/16 to `ids_loops1`.
 
@@ -44,7 +44,7 @@ B. **Numerical verdict.** Re-run (pid 72153, 30-min ceiling) of
    /Volumes/Widekeep/oracle/discriminating-prompt-top5.json --teacher-forced --n 16`.
    If it died again, rerun detached, not foreground. Read the verdict from the
    tool's exit code and per-position table; report the LOOP-AGREEMENT COUNT, not
-   an id match. Expected: ≥14/16 against loops=4, ≤8/16 against loops=1.
+   an id match. Expected: >=14/16 against loops=4, <=8/16 against loops=1.
 C. **Style pass** on `src/models/dory.cpp` (delegated to another agent). If it is
    done, verify `cmake --build build --target llama-cli -j8` returns 0.
 D. **llama-cli `--emit-token-ids`** (entry 2125613507) is being written by an
@@ -93,8 +93,8 @@ PR #32963 are now CLOSED and unmerged. Both received the repository's AI-content
 warning and were closed politely on 2026-11-24 with "will take the work
 elsewhere". The `darkhipo:dory-arch` and `darkhipo:enum-names` branches remain
 available in our own non-gating fork, public or private. Do not reopen either PR
-or create another upstream contribution; MultiAgency's `AGENTS.md` names this
-repository as a verified human-in-the-loop exclusion. A third-party fork
+or create another upstream contribution; MultiAgency policy names this repository
+as a verified human-in-the-loop exclusion (body memory section `upstream-exclusions`, commit 099046d89). A third-party fork
 requires its own rules check first.
 
 A. Converter is landed in the branch. A fresh conversion of the BF16 checkpoint

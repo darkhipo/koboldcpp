@@ -141,7 +141,7 @@ MLP. 16 + 40 + 16 = 72 is a module count; the README's 8 / 20 / 8 counts
 ## The forward pass, as the reference implements it
 
 nGPT normalisation is a **unit-sphere** projection, not RMS:
-`L2Norm(x) = x * rsqrt(sum(x²) + 1e-6)`; `eps = 1e-6`.
+`L2Norm(x) = x * rsqrt(sum(x^2) + 1e-6)`; `eps = 1e-6`.
 
 A module (attention or MLP) is an **interpolation toward its output**, never a
 plain residual add:

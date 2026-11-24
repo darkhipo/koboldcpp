@@ -168,17 +168,17 @@ zero `not enough space in the context's memory pool`.
 in the test, not in the port.** The chosen "discriminating" token is a coin flip
 INSIDE the BF16 reference itself: at position 5, loops=4 scores
 `5675 = 13.493` against `9032 = 13.485` - a **0.008** margin - while the
-quantised artifact deviates from BF16 by 0.05–0.7, i.e. 6–90x the signal.
+quantised artifact deviates from BF16 by 0.05-0.7, i.e. 6-90x the signal.
 Measured evidence that the port is otherwise right: `prompt_ids` match exactly;
 the top-5 at the last prompt position is the same SET in the same ORDER with
-Δ ≤ 0.6 (1032 18.233 vs 18.255; 2007 13.568 vs 13.276; 1659 13.307 vs 12.973;
+delta <= 0.6 (1032 18.233 vs 18.255; 2007 13.568 vs 13.276; 1659 13.307 vs 12.973;
 1058 12.731 vs 12.649; 1877 12.475 vs 11.898); and teacher-forced positions 1-4
-agree on argmax within Δ ≤ 0.7.
+agree on argmax within delta <= 0.7.
 
 ACCEPTANCE, replacing the id list above:
 1. `prompt_ids` must match exactly (this is a tokenizer check, and it does).
 2. The top-5 SET and ORDER at every position must match the BF16 reference.
-3. Per-position |Δlogit| ≤ 0.5 against BF16 (Q5_K_M's own noise floor), NOT
+3. Per-position |delta_logit| <= 0.5 against BF16 (Q5_K_M's own noise floor), NOT
    argmax equality.
 4. Optionally, a second oracle from a BF16 GGUF of the same model, where id
    equality IS meaningful.
@@ -206,9 +206,9 @@ a 5-bit quantisation.
 
 Every 1-D `*_scale` / `alpha` tensor in the GGUF is byte-identical to the raw
 reference parameter (dequantised BF16 vs `model.safetensors`, ratio 1.00000):
-`attn_qk_scale` ≡ `mixer.sqk` (0.02939), `attn_gate_scale` ≡ `mixer.s_gate`
-(0.03070), `residual_alpha` ≡ `attn_alpha` (0.17995), `ffn_gate_scale` ≡
-`mixer.suv_gate` (1.99049), `output_scale` ≡ `lm_head.logit_scale` (2.02304).
+`attn_qk_scale` == `mixer.sqk` (0.02939), `attn_gate_scale` == `mixer.s_gate`
+(0.03070), `residual_alpha` == `attn_alpha` (0.17995), `ffn_gate_scale` ==
+`mixer.suv_gate` (1.99049), `output_scale` == `lm_head.logit_scale` (2.02304).
 So the PORT applies the folds itself, from `dory.init_std` (0.0177) and
 `dory.alpha_init` (0.05). The earlier claim in this file that they were
 "already the folded product" was wrong; applying the fold twice is ~4e4x off.
