@@ -36,6 +36,10 @@ ROOT = os.path.dirname(HERE)
 MODES = ("mmap", "mmap,noprefetch")
 PORTS_NEVER_USE = (8095, 19102)  # other minds' model servers on this host
 LLDB = "/usr/bin/lldb"
+def q(text):
+    return '"' + str(text).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 WILLNEED_LENS = []  # filled by the lldb breakpoint callback in server mode
 BP_COMMAND = "breakpoint command add 2 -o " + q(
     "script print('WILLNEED len=%d' % lldb.frame.FindRegister('x1').GetValueAsUnsigned())"
@@ -65,9 +69,6 @@ def clean_env():
     env.setdefault("PATH", "/usr/bin:/bin")
     return env
 
-
-def q(text):
-    return '"' + str(text).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def run_lldb(commands, outdir, tag, timeout):
