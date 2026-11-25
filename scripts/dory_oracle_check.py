@@ -991,14 +991,62 @@ def find_reference(explicit: str) -> tuple[Path | None, list[str]]:
 # Token string -> id for servers that report candidates by STRING (the legacy
 # "probs" shape); None until a model's tokenizer table has been read.
 _VOCAB: dict[str, int] | None = None
+# Pieces that more than one token id prints identically: a candidate printed
+# that way cannot be resolved to an id and is refused rather than guessed.
+_VOCAB_SHARED: set[str] = set()
+
+
+_BYTE_DECODER: dict[str, int] | None = None
+
+
+def _byte_level_decoder() -> dict[str, int]:
+    """Byte-level BPE glyphs inverted: glyph -> byte (the GPT-2 ``bytes_to_unicode`` table)."""
+    base = list(range(0x21, 0x7F)) + list(range(0xA1, 0xAD)) + list(range(0xAE, 0x100))
+    codes = list(base)
+    spare = 0x100
+    for byte in range(256):
+        if byte not in base:
+            base.append(byte)
+            codes.append(spare)
+            spare += 1
+    return {chr(code): byte for byte, code in zip(base, codes)}
+
+
+def _token_piece(token: str) -> str:
+    """The text a tokenizer prints for a byte-level BPE token ('ĠWhat' -> ' What')."""
+    global _BYTE_DECODER
+    if _BYTE_DECODER is None:
+        _BYTE_DECODER = _byte_level_decoder()
+    raw = bytearray()
+    for glyph in token:
+        if glyph in _BYTE_DECODER:
+            raw.append(_BYTE_DECODER[glyph])
+        else:
+            raw.extend(glyph.encode("utf-8"))
+    # surrogateescape keeps partial UTF-8 byte tokens distinct; a server prints
+    # those as U+FFFD, which then fails to map (loudly) instead of mis-mapping.
+    return raw.decode("utf-8", errors="surrogateescape")
+
+
+def _is_byte_level(reader) -> bool:
+    """Whether the model's tokenizer is the byte-level BPE family whose glyphs need decoding."""
+    field = reader.fields.get("tokenizer.ggml.model")
+    if field is None or not field.parts:
+        return False
+    return bytes(field.parts[-1]).decode("utf-8", errors="replace") == "gpt2"
 
 
 def load_vocab(model: Path) -> dict[str, int]:
-    """Read the model's own tokenizer table: token string -> id (first occurrence wins)."""
+    """Read the model's own tokenizer table as the text a SERVER prints: piece -> id.
+    Byte-level BPE tokens are decoded first ('Ġ' is a space).  A piece printed by
+    more than one id is recorded in _VOCAB_SHARED and refused at parse time.
+    A server never prints the raw glyph, so pieces are the only keys."""
     import numpy as np
     from gguf import GGUFReader
 
-    field = GGUFReader(model).fields["tokenizer.ggml.tokens"]
+    global _VOCAB_SHARED
+    reader = GGUFReader(model)
+    field = reader.fields["tokenizer.ggml.tokens"]
     # A string array arrives as (length, bytes) pairs after the key header, so
     # every uint8 part after the key's own bytes is one token, in id order.
     tokens = [
@@ -1021,9 +1069,18 @@ def load_vocab(model: Path) -> dict[str, int]:
         raise ValueError(
             f"tokenizer table is inconsistent: {len(tokens)} token strings against {pairs} length/bytes pairs"
         )
+    byte_level = _is_byte_level(reader)
     vocab: dict[str, int] = {}
+    shared: set[str] = set()
     for token_id, token in enumerate(tokens):
-        vocab.setdefault(token, token_id)
+        # A server prints only the PIECE (the token's decoded text), never the
+        # raw glyph, so pieces are the sole keys.
+        key = _token_piece(token) if byte_level else token
+        if key in vocab:
+            shared.add(key)
+            continue
+        vocab[key] = token_id
+    _VOCAB_SHARED = shared
     return vocab
 
 
@@ -1059,7 +1116,13 @@ def parse_positions(body: dict, want: int) -> tuple[list[dict] | None, str]:
                     )
                 top = []
                 for cand in legacy[:want]:
-                    tid = _VOCAB.get(str(cand.get("tok_str")))
+                    text = str(cand.get("tok_str"))
+                    if text in _VOCAB_SHARED:
+                        return None, (
+                            f"{PROB_KEYS[0]}[{i}] legacy candidate {text!r} is printed by more than one "
+                            "token id, so the id cannot be recovered from the server's answer"
+                        )
+                    tid = _VOCAB.get(text)
                     prob = _as_float(cand.get("prob"))
                     if tid is None or prob is None or prob <= 0:
                         return None, (
@@ -1817,12 +1880,13 @@ def run_logits(args, binary: Path, model: Path, oracle_path: Path, server: dict)
     tok_bin = sibling(binary, "llama-tokenize")
 
     oracle_data, prompt, prompt_ids, expected, id_field = load_logits_oracle(oracle_path)
-    global _VOCAB
+    global _VOCAB, _VOCAB_SHARED
     try:
         _VOCAB = load_vocab(model)
     except (ImportError, KeyError, OSError, ValueError, TypeError, IndexError) as exc:
         # Optional until a server answers in the legacy shape; that path says so loudly.
         _VOCAB = None
+        _VOCAB_SHARED = set()
         print(f"note: legacy-probs adapter unavailable for this model: {exc}")
 
     n = args.n

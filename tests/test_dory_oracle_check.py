@@ -780,3 +780,35 @@ def test_parse_positions_refuses_a_legacy_candidate_it_cannot_map(monkeypatch: p
     parsed, err = oracle_check.parse_positions(body, 2)
 
     assert parsed is None and "maps to no token id" in err
+
+
+def test_token_piece_decodes_byte_level_glyphs() -> None:
+    # A server prints the PIECE: the byte-level glyph 'Ġ' is a space, 'Ċ' a newline.
+    assert oracle_check._token_piece("ĠWhat") == " What"
+    assert oracle_check._token_piece("Ġ") == " "
+    assert oracle_check._token_piece("Ċ") == "\n"
+    assert oracle_check._token_piece("abc") == "abc"
+
+
+def test_load_vocab_is_keyed_by_the_piece_a_server_prints() -> None:
+    # Against the real model: the candidate a server prints as ' ' is id 1032,
+    # whose vocabulary glyph is 'Ġ'.  Skipped where the Dory model is absent.
+    model = Path(oracle_check.DEFAULT_MODEL)
+    if not model.is_file():
+        pytest.skip("no Dory model on this host")
+    vocab = oracle_check.load_vocab(model)
+    assert vocab[" "] == 1032
+    assert vocab[" What"] == 5675
+    assert "ĠWhat" not in vocab  # a server never prints the raw glyph
+    assert not oracle_check._VOCAB_SHARED  # 131,072 pieces, none shared
+
+
+def test_parse_positions_refuses_a_piece_that_more_than_one_id_prints(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Resolving a printed piece to the wrong id would be a silent numerical error.
+    monkeypatch.setattr(oracle_check, "_VOCAB", {" x": 7})
+    monkeypatch.setattr(oracle_check, "_VOCAB_SHARED", {" x"})
+    body = {"completion_probabilities": [{"content": " x", "probs": [{"tok_str": " x", "prob": 0.5}]}]}
+
+    parsed, err = oracle_check.parse_positions(body, 1)
+
+    assert parsed is None and "more than one" in err
