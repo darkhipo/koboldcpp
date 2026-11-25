@@ -599,3 +599,59 @@ def test_bf16_mode_reports_a_substitution_failure_through_report_logits(capsys: 
     assert "VERDICT: FAIL -- at least one position breaks the strict SET/ORDER acceptance" in captured.out
     assert "BF16 VERDICT: FAIL" in captured.out and "9999" in captured.out
     assert "BF16 VERDICT: PASS" not in captured.out
+
+
+
+# ---------------------------------------------------------------------------
+# BF16 flag plumbing  (register 2125613731)
+# ---------------------------------------------------------------------------
+
+
+def test_bf16_flag_with_a_non_bf16_reference_is_a_loud_plumbing_error(capsys: pytest.CaptureFixture[str]) -> None:
+    actual = [(1032, -0.1), (2007, -5.0)]
+    rows = [{"position": 0, "actual": actual, "why": ""}]
+
+    rc = oracle_check.report_logits(
+        rows, report_reference(), 0.5, "pytest", Path("oracle.json"), "ids_loops4", [actual], None, allow_bf16_noise=True)
+
+    captured = capsys.readouterr()
+    assert rc == oracle_check.EXIT_PLUMBING == 3
+    assert "PLUMBING" in captured.err and "--accept-bf16-noise" in captured.err
+    assert "reference.json" in captured.err and "provenance" in captured.err and "'pytest'" in captured.err
+    assert "BF16 VERDICT" not in captured.out  # the relaxed rule is never evaluated
+
+
+def test_bf16_flag_is_refused_before_the_server_is_launched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    h = logits_harness(tmp_path, monkeypatch)
+    fake = h["fake"]
+    try:
+        rc = h["run"]("bf16flag", "--accept-bf16-noise")  # the harness reference is declared source=pytest, not BF16
+        hits = fake.health_hits
+    finally:
+        fake.stop()
+
+    captured = capsys.readouterr()
+    assert rc == oracle_check.EXIT_PLUMBING
+    assert "PLUMBING" in captured.err and "--accept-bf16-noise" in captured.err
+    assert hits == 0 and fake.requests == []  # refused before anything was launched or collected
+
+
+def test_bf16_flag_on_an_id_route_is_refused_rather_than_ignored(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    build = tmp_path / "build"
+    binary = make_executable(build / "llama-cli")
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"not a real gguf")
+    oracle = tmp_path / "oracle.json"
+    oracle.write_text(json.dumps({"prompt": "hi", "prompt_ids": [1], "generated_ids": [2]}), encoding="utf-8")
+
+    rc = oracle_check.main([
+        "--route", "server", "--accept-bf16-noise", "--boot-timeout", "2",
+        "--binary", str(binary), "--model", str(model), "--oracle", str(oracle),
+        "--server", str(make_executable(build / "llama-server")),
+    ])
+
+    captured = capsys.readouterr()
+    assert rc == oracle_check.EXIT_PLUMBING
+    assert "--accept-bf16-noise" in captured.err and "--route logits" in captured.err

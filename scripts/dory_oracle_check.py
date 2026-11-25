@@ -1237,6 +1237,29 @@ def dump_observed(path: Path, positions: list[list[tuple[int, float]]], meta: di
     return path
 
 
+def bf16_reference_refusal(reference: dict) -> str:
+    """Why --accept-bf16-noise cannot be used with this reference, or "" when it can.
+
+    The relaxed rule excuses BF16-level numerical noise.  Pointed at any other
+    reference (another precision, or the port's own output) it would quietly
+    lower the strict acceptance, so there the flag is a plumbing error, never a
+    silent fallback to either rule.
+    """
+    provenance = str(reference["provenance"])
+    if "BF16" in provenance.upper():
+        return ""
+    return (
+        "PLUMBING: --accept-bf16-noise relaxes SET/ORDER for BF16-level numerical noise only,\n"
+        "  and this reference is not declared BF16:\n"
+        f"    reference : {reference['path']}\n"
+        f"    provenance: {provenance!r}\n"
+        "  Applying the relaxed rule to a reference it was not calibrated for is how a strict\n"
+        "  FAIL turns into a silent PASS.  Fix the plumbing instead:\n"
+        "    - drop --accept-bf16-noise for the strict verdict, or\n"
+        "    - pass the BF16 reference with --reference <file> (its source/provenance says BF16)."
+    )
+
+
 def report_logits(
     rows: list[dict],
     reference: dict | None,
@@ -1291,12 +1314,10 @@ def report_logits(
             "  The port's own top-5 was printed and dumped above.  Do not read it as acceptance.",
         )
 
-    if allow_bf16_noise and "BF16" not in reference["provenance"].upper():
-        return fail(
-            EXIT_PLUMBING,
-            "--accept-bf16-noise requires a BF16 reference",
-            f"  reference provenance is: {reference['provenance']}",
-        )
+    if allow_bf16_noise:
+        refusal = bf16_reference_refusal(reference)
+        if refusal:
+            return fail(EXIT_PLUMBING, "--accept-bf16-noise requires a BF16 reference", refusal)
 
     quantity = reference["quantity"]
     if quantity == "logprobs":
@@ -1722,6 +1743,12 @@ def run_logits(args, binary: Path, model: Path, oracle_path: Path, server: dict)
                 "ORACLE/REFERENCE MISMATCH -- no numerical verdict is possible",
                 mismatch + "\n  Pass the matching --oracle JSON; comparing different prompts is not model evidence.",
             )
+    if reference is not None and args.accept_bf16_noise:
+        # Before the model is hashed and the server launched: a misplumbed flag must
+        # not cost minutes of collection before it is told apart (register 2125613731).
+        refusal = bf16_reference_refusal(reference)
+        if refusal:
+            return fail(EXIT_PLUMBING, "--accept-bf16-noise requires a BF16 reference", refusal)
     n_probs = args.n_probs
     if reference is not None:
         widest = max(len(top) for top in reference["positions"].values())
@@ -2059,6 +2086,15 @@ def main(argv: list[str] | None = None) -> int:
         )
     if not model.is_file():
         return fail(EXIT_CANNOT_RUN, f"model is missing: {model}")
+
+    if args.accept_bf16_noise and args.route != "logits":
+        return fail(
+            EXIT_PLUMBING,
+            "--accept-bf16-noise only applies to --route logits",
+            "  The id-based routes (auto, server, cli) compare token ids, not top-5 logprobs.  There\n"
+            "  the flag would do nothing, which is indistinguishable from having been honoured.\n"
+            "  Re-run with --route logits and a BF16 --reference, or drop the flag.",
+        )
 
     # Resolved once, logged once, and never an implicit PATH fallback (register 2125613719).
     server: dict | None = None
