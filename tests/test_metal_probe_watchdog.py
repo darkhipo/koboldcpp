@@ -214,20 +214,33 @@ def test_footprint_sampler_covers_this_process():
     assert sampler(os.getpid()) < int(own) * 1024 + 2**30, "footprint drifted impossibly far from RSS"
 
 
-def test_footprint_metric_can_trigger_the_kill(tmp_path, alloc_child):
+def test_default_metric_is_footprint_on_macos_and_kills(tmp_path, alloc_child):
     if sys.platform != "darwin":
         pytest.skip("libproc is macOS only")
     proc, csv_path, log_path = run_watchdog(
         tmp_path, [sys.executable, str(alloc_child), "2", "0.03", GRANDCHILD_MARKER],
-        "--max-gb", "0.2", "--interval", "0.05", "--max-seconds", "60", "--metric", "footprint",
+        "--max-gb", "0.2", "--interval", "0.05", "--max-seconds", "60",
     )
 
     assert proc.returncode == 3, proc.stderr
     assert grandchild_pid(log_path), "child was not alive to be killed"
     rows = read_rows(csv_path)
     assert rows[-1]["event"] == "killed_memory"
+    # RSS cannot see memory the GPU wrote, so it must not be the default here.
+    assert {r["metric"] for r in rows} == {"footprint"}
     assert int(rows[-2]["footprint_bytes"]) > 0.2 * GIB
     assert not wait_until_gone(), "command survived the memory kill"
+
+
+@pytest.mark.parametrize("metric", ["auto", "rss"])
+def test_metric_column_records_what_was_measured(tmp_path, metric):
+    expected = "rss" if metric == "rss" or sys.platform != "darwin" else "footprint"
+    proc, csv_path, _ = run_watchdog(
+        tmp_path, [sys.executable, "-c", "pass"], "--max-gb", "10", "--metric", metric,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert {r["metric"] for r in read_rows(csv_path)} == {expected}
 
 
 def test_help_does_not_start_anything(tmp_path):

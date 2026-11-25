@@ -5,14 +5,16 @@ The command starts in its own session, so it leads a fresh process group. Every
 --interval seconds the memory of its whole process tree (the group plus any
 descendant that left it) is sampled with ps and appended to a CSV time series.
 A sample above --max-gb gets the tree SIGKILLed (exit 3); a run longer than
---max-seconds gets exit 4. If the watchdog itself fails or is signalled, the
-tree is killed first: a live command is never left unguarded.
+--max-seconds gets exit 4. If the watchdog fails or is signalled, the tree is
+killed first: a live command is never left unguarded.
 
 Metrics (--metric):
-    rss        Sum of ps RSS over the tree. Portable. Compressed or swapped
-               pages are not counted.
+    rss        Sum of ps RSS over the tree. Portable, but blind to memory the
+               GPU wrote: measured on an M-series Mac, a 256 MiB Metal buffer
+               filled by the GPU left RSS at 13 MiB and footprint at 422 MiB.
     footprint  macOS only: sum of ri_phys_footprint (libproc), i.e. what the
-               kernel bills each process for.
+               kernel bills each process for, Metal buffers included.
+    auto       footprint where libproc exists, otherwise rss (the default).
 
 Exit codes: 0 completed, 3 killed for memory, 4 killed for time. Any other
 value is the command's own exit status, so a command that exits 3 or 4 by
@@ -31,7 +33,7 @@ import time
 
 EXIT_KILLED_MEMORY = 3
 EXIT_KILLED_TIME = 4
-CSV_HEADER = ("t_s", "n_procs", "rss_bytes", "footprint_bytes", "event")
+CSV_HEADER = ("t_s", "n_procs", "rss_bytes", "footprint_bytes", "metric", "event")
 
 
 def make_footprint_sampler():
@@ -118,7 +120,7 @@ def main(argv=None):
     parser.add_argument("--max-gb", type=float, default=40.0, help="memory limit in GiB (default: 40)")
     parser.add_argument("--max-seconds", type=float, default=300.0, help="wall-clock limit in seconds (default: 300)")
     parser.add_argument("--interval", type=float, default=0.5, help="seconds between samples (default: 0.5)")
-    parser.add_argument("--metric", choices=("rss", "footprint"), default="rss")
+    parser.add_argument("--metric", choices=("auto", "rss", "footprint"), default="auto")
     parser.add_argument("--csv", required=True, help="output path for the time series")
     parser.add_argument("--log", help="file for the command's stdout+stderr (default: pass through)")
     parser.add_argument("command", nargs=argparse.REMAINDER, help="the command to run, after --")
@@ -128,11 +130,10 @@ def main(argv=None):
         parser.error("no command given; pass it after --")
     if min(args.max_gb, args.max_seconds, args.interval) <= 0:
         parser.error("limits and --interval must be > 0")
-    footprint = None
-    if args.metric == "footprint":
-        footprint = make_footprint_sampler()
-        if footprint is None:
-            parser.error("--metric footprint needs libproc, which is macOS only")
+    footprint = None if args.metric == "rss" else make_footprint_sampler()
+    if args.metric == "footprint" and footprint is None:
+        parser.error("--metric footprint needs libproc, which is macOS only")
+    metric = "footprint" if footprint else "rss"
 
     signal.signal(signal.SIGTERM, _interrupt)
     log = open(args.log, "w") if args.log else None
@@ -155,7 +156,7 @@ def main(argv=None):
                 now = time.monotonic() - start
                 if snap:
                     peak = max(peak, snap[3])
-                    writer.writerow((round(now, 3), len(snap[0]), snap[2], snap[3], ""))
+                    writer.writerow((round(now, 3), len(snap[0]), snap[2], snap[3], metric, ""))
                     fh.flush()
                 if proc.poll() is not None:
                     break
@@ -165,7 +166,7 @@ def main(argv=None):
                     reason = "time"
                 if reason:
                     kill_tree(proc, footprint)
-                    writer.writerow((round(time.monotonic() - start, 3), 0, snap[2] if snap else 0, peak,
+                    writer.writerow((round(time.monotonic() - start, 3), 0, snap[2] if snap else 0, peak, metric,
                                      f"killed_{reason}"))
                     break
                 time.sleep(args.interval)
@@ -177,18 +178,12 @@ def main(argv=None):
             raise
         fh.flush()
 
-    if reason == "memory":
-        code = EXIT_KILLED_MEMORY
-    elif reason == "time":
-        code = EXIT_KILLED_TIME
-    elif reason == "interrupt":
-        code = 130
-    elif proc.returncode is None:
-        code = 1
+    if reason:
+        code = {"memory": EXIT_KILLED_MEMORY, "time": EXIT_KILLED_TIME, "interrupt": 130}[reason]
     else:
         code = 128 - proc.returncode if proc.returncode < 0 else proc.returncode
     print(f"metal_probe_watchdog: {reason or 'completed'} after {time.monotonic() - start:.1f}s, "
-          f"peak {peak / 2**20:.0f} MiB ({args.metric}), csv {args.csv}", file=sys.stderr)
+          f"peak {peak / 2**20:.0f} MiB ({metric}), csv {args.csv}", file=sys.stderr)
     if log:
         log.close()
     return code
