@@ -144,3 +144,34 @@ None of this is in PR #2676 or PR #2674 yet.
 * `agent-fullprecision` - `run_bf16_full_when_memory_allows.py`, a gated runner
   for the full-precision BF16 rerun (waits for swap used <= 16 GB, then builds
   `llamaserver` if needed, then runs the oracle once and writes a result file).
+
+## EXACT BF16 RUN COMPLETED 2026-11-25 (closes 2125613718)
+
+One uninterrupted teacher-forced run: 316.7 s, CPU, loops=4 BF16 control, and the
+server the result records is `server : /private/tmp/kobold-dory/llama-server` (the
+tree's own binary, not the PATH fallback).
+
+- Strict SET/ORDER: **FAIL at 3, 5, 15 of 16**, nothing skipped. Position 3 is
+  order-only (max shared delta 0.298), 15 order-only (0.154); 5 is the set
+  difference 3075 vs 3367 with the argmax flipping inside the reference's own
+  ~0.008 tie.
+- BF16 relaxed verdict: **PASS, 16 positions**.
+- Against the earlier reconstructed artifact: positions 0-8 differ by at most
+  0.000483 logprob and no token entered or left either list; positions 9-15 are
+  bit-identical. The reconstruction was faithful to its rounding, so its caveat
+  was provenance, never precision.
+- Evidence copied off /tmp, which is purging large files:
+  `/Volumes/Widekeep/oracle/dory-exact/full-observed.json`, `full-report.log`,
+  `run-result.json`.
+
+Two blockers had to be found by running, both now handled:
+
+- The oracle resolves `llama-server` as a sibling of the RESOLVED `--binary`, i.e.
+  `<tree>/llama-server` with a hyphen, while KoboldCpp builds `llamaserver`. If
+  that symlink is missing the oracle silently uses the PATH build and dies with
+  `unknown architecture 'dory'` (exit 2) in about a second. Keep the symlink; the
+  runner now creates it.
+- `llama-server` fails Metal init when the generated `kernels/` directory is
+  absent, even with `-ngl 0`, and `make` skips the recipe that creates it while
+  `ggml-metal-device-m.o` is newer than the kernels. `rm ggml-metal-device-m.o &&
+  make ggml-metal-device-m.o LLAMA_METAL=1` restores it (43 files).
