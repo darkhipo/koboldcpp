@@ -99,6 +99,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -1138,15 +1139,76 @@ def compare_position(
     }
 
 
+# BF16 relaxed rule, substitution bound (register 2125613721).  A candidate that
+# sits in ONE top-5 but not the other has no shared-token delta --
+# compare_position() differences only ids both lists have -- so the relaxed rule
+# used to accept it at ANY probability.  It is now acceptable only when it is
+# negligible against the position's top token, measured in the list that has it
+# (the reference for a candidate the port dropped, the port for one it added):
+#
+#     logprob(candidate) - logprob(top)  <=  BF16_UNSHARED_REL_LOGPROB
+#
+# i.e. at most BF16_UNSHARED_MAX_PROB_RATIO of the top token's probability.
+# Relative, not absolute: (a) logprob_i - logprob_top == logit_i - logit_top, so
+# the same number is measurable against a logits reference, where an absolute
+# probability is not; (b) across the 16 calibration positions the top token's
+# own probability ranges from 5.6% to 99.9%, so one absolute probability does not
+# mean the same thing at every position.  1% because a candidate that small
+# cannot reach the argmax even after the tolerated shifts (top token down 0.5,
+# candidate up 0.5: still under 3% of the top), and because in the calibration
+# data it sits in the empty gap between the two kinds of substitution actually
+# observed: rank-5 tail swaps at <= 0.013% of the top token, and swaps at the
+# flat, loops-discriminating position 5 at >= 74%.  The bound is deliberately
+# strict for flat positions: a top-5 boundary that is itself worth several
+# percent of the top token is reported, not excused.
+BF16_UNSHARED_MAX_PROB_RATIO = 0.01
+BF16_UNSHARED_REL_LOGPROB = math.log(BF16_UNSHARED_MAX_PROB_RATIO)
+
+
+def bf16_unshared_candidates(
+    actual: list[tuple[int, float]],
+    expected: list[tuple[int, float]],
+    max_rel_logprob: float | None = None,
+) -> list[dict]:
+    """Candidates present in exactly one top-5, weighed against that list's top token.
+
+    Reference-only candidates come first (in reference order), then port-only
+    ones (in port order).  rel_logprob is value_i - value_top, which is the
+    logprob difference whether the values are logprobs or raw logits.
+    """
+    if max_rel_logprob is None:
+        max_rel_logprob = BF16_UNSHARED_REL_LOGPROB
+    out: list[dict] = []
+    for side, own, other in (("reference only", expected, dict(actual)), ("port only", actual, dict(expected))):
+        top = own[0][1]
+        for tid, val in own:
+            if tid in other:
+                continue
+            rel = val - top
+            out.append({
+                "id": tid,
+                "side": side,
+                "value": val,
+                "rel_logprob": rel,
+                "p_ratio": math.exp(rel),
+                "within_bound": rel <= max_rel_logprob,
+            })
+    return out
+
+
 def bf16_relaxed_position_verdict(
     actual: list[tuple[int, float]],
     expected: list[tuple[int, float]],
     quantity: str,
     tol: float,
+    unshared_rel_logprob_max: float | None = None,
 ) -> tuple[bool, dict]:
-    """Accept numerical order noise without hiding argmax or large-delta errors."""
+    """Accept numerical order noise without hiding argmax, large-delta or substitution errors."""
     cmp = compare_position(actual, expected, quantity, tol)
+    cmp["unshared"] = bf16_unshared_candidates(actual, expected, unshared_rel_logprob_max)
     if cmp["max_delta"] > tol:
+        return False, cmp
+    if any(not entry["within_bound"] for entry in cmp["unshared"]):
         return False, cmp
     if cmp["argmax_match"]:
         return True, cmp
@@ -1336,15 +1398,23 @@ def report_logits(
         for row in rows:
             idx = row["position"]
             expected_top = reference["positions"][idx]
-            relaxed, _ = bf16_relaxed_position_verdict(row["actual"], expected_top, quantity, tol)
+            relaxed, info = bf16_relaxed_position_verdict(row["actual"], expected_top, quantity, tol)
+            if info["unshared"]:
+                state = "within bound" if all(entry["within_bound"] for entry in info["unshared"]) else "OVER BOUND"
+                print(f"[{idx:2d}] BF16 substitution check: {state}   "
+                      + "; ".join(f"id {entry['id']} ({entry['side']}) p/p_top={entry['p_ratio']:.4f}"
+                                  for entry in info["unshared"])
+                      + f"   [bound: <= {BF16_UNSHARED_MAX_PROB_RATIO:g}]")
             if not relaxed:
                 relaxed_failures.append(idx)
         print()
         if relaxed_failures:
-            print(f"BF16 VERDICT: FAIL -- delta > {tol} or a non-tie argmax flip at {relaxed_failures}")
+            print(f"BF16 VERDICT: FAIL -- delta > {tol}, a non-tie argmax flip, or a top-5 substitution "
+                  f"above {BF16_UNSHARED_MAX_PROB_RATIO:.0%} of the top token at {relaxed_failures}")
             return EXIT_MISMATCH
         print(f"BF16 VERDICT: PASS -- {compared} positions, shared-token delta <= {tol}; "
-              "set/order are informational, argmax ties <= 0.05 logprob allowed")
+              "set/order are informational, argmax ties <= 0.05 logprob allowed; "
+              f"unshared candidates <= {BF16_UNSHARED_MAX_PROB_RATIO:.0%} of the top token")
         return EXIT_MATCH
 
     if failures:
@@ -1944,7 +2014,8 @@ def main(argv: list[str] | None = None) -> int:
     logits.add_argument(
         "--accept-bf16-noise",
         action="store_true",
-        help="BF16-only acceptance: shared-token delta <= tol plus argmax, allowing <=0.05 ties; strict SET/ORDER remains printed",
+        help="BF16-only acceptance: shared-token delta <= tol plus argmax, allowing <=0.05 ties; a candidate "
+             "in only one top-5 must be <= 1% of the top token; strict SET/ORDER remains printed",
     )
     logits.add_argument(
         "--dump-observed",

@@ -514,3 +514,88 @@ def test_resume_from_an_unreadable_checkpoint_is_a_loud_plumbing_error(
     assert raised.value.code == oracle_check.EXIT_PLUMBING
     assert "checkpoint" in capsys.readouterr().err
     assert hits == 0
+
+
+
+# ---------------------------------------------------------------------------
+# BF16 substitution bound  (register 2125613721)
+# ---------------------------------------------------------------------------
+
+
+def test_bf16_mode_rejects_an_unexpected_candidate_with_real_probability() -> None:
+    # Shared tokens move by 0.1 and the argmax agrees, so before the bound this PASSED:
+    # id 12 sits in the port's top-5 with half the top token's probability while the
+    # reference does not rank it at all.
+    expected = [(10, -0.1), (11, -4.0), (13, -7.2)]
+    actual = [(10, -0.2), (12, -0.9), (11, -4.1)]
+
+    cmp = oracle_check.compare_position(actual, expected, "logprobs", 0.5)
+    relaxed, info = oracle_check.bf16_relaxed_position_verdict(actual, expected, "logprobs", 0.5)
+
+    assert cmp["max_delta"] <= 0.5 and cmp["argmax_match"]  # the hole the bound closes
+    assert not relaxed
+    assert [entry["id"] for entry in info["unshared"] if not entry["within_bound"]] == [12]
+
+
+def test_bf16_mode_rejects_a_missing_reference_candidate_with_real_probability() -> None:
+    # The reference gives id 11 90% of the top token's probability; the port drops it from its top-5.
+    expected = [(10, -2.0), (11, -2.1), (12, -5.0)]
+    actual = [(10, -2.1), (12, -5.0), (13, -7.5)]  # id 13 is a tail-level stand-in: 0.45% of the top token
+
+    relaxed, info = oracle_check.bf16_relaxed_position_verdict(actual, expected, "logprobs", 0.5)
+
+    assert not relaxed
+    assert [entry["id"] for entry in info["unshared"] if not entry["within_bound"]] == [11]
+
+
+def test_bf16_mode_still_allows_tail_level_substitutions() -> None:
+    # Both sides swap their last-listed token, each far below 1% of the top token.
+    expected = [(10, -0.1), (11, -4.0), (13, -7.2)]
+    actual = [(10, -0.2), (11, -4.1), (14, -7.3)]
+
+    relaxed, info = oracle_check.bf16_relaxed_position_verdict(actual, expected, "logprobs", 0.5)
+
+    assert relaxed
+    assert [(entry["id"], entry["side"]) for entry in info["unshared"]] == [(13, "reference only"), (14, "port only")]
+    assert all(entry["within_bound"] for entry in info["unshared"])
+
+
+def test_bf16_substitution_bound_is_one_percent_of_the_top_token() -> None:
+    # Exactly at the bound is acceptable (<=); a hair beyond it is not.
+    bound = oracle_check.BF16_UNSHARED_REL_LOGPROB
+    expected = [(10, -0.1), (11, -4.0), (13, -0.1 + bound)]
+    inside = [(10, -0.2), (11, -4.1), (14, -0.2 + bound - 0.01)]
+    outside = [(10, -0.2), (11, -4.1), (14, -0.2 + bound + 0.01)]
+
+    assert oracle_check.BF16_UNSHARED_MAX_PROB_RATIO == 0.01
+    assert bound < -4.6 and bound > -4.7
+    assert oracle_check.bf16_relaxed_position_verdict(inside, expected, "logprobs", 0.5)[0]
+    assert not oracle_check.bf16_relaxed_position_verdict(outside, expected, "logprobs", 0.5)[0]
+
+
+def test_bf16_substitution_is_measured_against_a_logits_reference_too() -> None:
+    # Centred values are the same number in logits and logprobs, so the bound needs no units.
+    expected = [(10, 12.5), (11, 8.6), (13, 5.3)]
+    actual = [(10, 12.4), (12, 11.6), (11, 8.5)]
+
+    relaxed, info = oracle_check.bf16_relaxed_position_verdict(actual, expected, "logits", 0.5)
+
+    assert not relaxed
+    assert info["unshared"][1]["id"] == 12 and info["unshared"][1]["p_ratio"] > 0.4
+
+
+def test_bf16_mode_reports_a_substitution_failure_through_report_logits(capsys: pytest.CaptureFixture[str]) -> None:
+    reference = report_reference()
+    reference["provenance"] = "BF16 pytest"
+    reference["positions"] = {0: [(1032, -0.1), (2007, -5.0), (1659, -5.5)]}
+    actual = [(1032, -0.2), (9999, -0.6), (2007, -5.1)]  # 9999: half the top token's probability, unknown to the reference
+    rows = [{"position": 0, "actual": actual, "why": ""}]
+
+    rc = oracle_check.report_logits(
+        rows, reference, 0.5, "pytest", Path("oracle.json"), "ids_loops4", [actual], None, allow_bf16_noise=True)
+
+    captured = capsys.readouterr()
+    assert rc == oracle_check.EXIT_MISMATCH == 1
+    assert "VERDICT: FAIL -- at least one position breaks the strict SET/ORDER acceptance" in captured.out
+    assert "BF16 VERDICT: FAIL" in captured.out and "9999" in captured.out
+    assert "BF16 VERDICT: PASS" not in captured.out
