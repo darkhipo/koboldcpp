@@ -181,6 +181,67 @@ def sibling(binary: Path, name: str) -> Path | None:
     return Path(found) if found else None
 
 
+def foreign_tool_note(binary: Path, tool: Path | None, name: str) -> str:
+    """Note when a helper tool came from PATH instead of the build's own directory."""
+    if tool is None or tool.resolve().parent == binary.parent:
+        return ""
+    return (
+        f"note: {name} {tool} was found on PATH, not next to --binary: it is not part of\n"
+        "      the build under test.  Its ids only witness the tokenizer round-trip; they\n"
+        "      are never the measurement itself.\n"
+    )
+
+
+def resolve_server(binary: Path, override: str = "") -> dict:
+    """Find the llama-server this run will launch.  NEVER an implicit PATH fallback.
+
+    The server under test must be the build that produced --binary.  A server
+    found on PATH is some other build, so its logprobs would be credited to (or
+    blamed on) the wrong one.  Resolution order:
+
+      1. --server <path>                  explicit and deliberate: any server
+      2. <dir of --binary>/llama-server   the expected sibling
+      3. nothing                          refused, even when PATH has one
+
+    Returns {"path", "source", "expected", "reason"}; reason is non-empty
+    exactly when path is None.
+    """
+    expected = (binary.parent / "llama-server").resolve()
+    if override:
+        chosen = Path(override).expanduser().resolve()
+        if not chosen.is_file() or not os.access(chosen, os.X_OK):
+            return {
+                "path": None,
+                "source": "--server override",
+                "expected": expected,
+                "reason": f"  --server is missing or not executable: {chosen}",
+            }
+        return {"path": chosen, "source": "--server override", "expected": expected, "reason": ""}
+
+    if expected.is_file() and os.access(expected, os.X_OK):
+        return {"path": expected, "source": "sibling of --binary", "expected": expected, "reason": ""}
+
+    state = "not executable" if expected.exists() else "missing"
+    found = shutil.which("llama-server")
+    refused = Path(found).resolve() if found else None
+    lines = [
+        f"  expected sibling: {expected}   ({state})",
+        f"  --binary        : {binary}",
+    ]
+    if refused is not None:
+        lines += [
+            f"  PATH candidate  : {refused}   REFUSED",
+            "  A server found on PATH is not necessarily this build.  Its logprobs would be",
+            "  credited to (or blamed on) the build under test, so it is never used implicitly.",
+        ]
+    lines += [
+        "  Either build the sibling:  cmake --build build --target llama-server",
+        "  or name the server you actually want.  That is a deliberate choice, so say so:",
+        f"      --server {refused or expected}",
+    ]
+    return {"path": None, "source": "", "expected": expected, "reason": "\n".join(lines)}
+
+
 # --------------------------------------------------------------------------
 # oracle
 # --------------------------------------------------------------------------
@@ -1332,15 +1393,11 @@ def report_argmax_agreement(
         print("      Check that dory.num_loops is read from the GGUF and used.")
 
 
-def run_logits(args, binary: Path, model: Path, oracle_path: Path) -> int:
+def run_logits(args, binary: Path, model: Path, oracle_path: Path, server: dict) -> int:
     """--route logits: the re-cut acceptance (top-5 SET/ORDER + |delta| tolerance)."""
-    server_bin = sibling(binary, "llama-server")
-    if server_bin is None:
-        return fail(
-            EXIT_CANNOT_RUN,
-            "route=logits but no llama-server next to --binary",
-            f"looked in {binary.parent} (and on PATH)",
-        )
+    if server["path"] is None:
+        return fail(EXIT_CANNOT_RUN, "route=logits but no llama-server to run", server["reason"])
+    server_bin = server["path"]
     tok_bin = sibling(binary, "llama-tokenize")
 
     oracle_data, prompt, prompt_ids, expected, id_field = load_logits_oracle(oracle_path)
@@ -1367,8 +1424,8 @@ def run_logits(args, binary: Path, model: Path, oracle_path: Path) -> int:
         widest = max(len(top) for top in reference["positions"].values())
         n_probs = max(n_probs, widest)
 
-    print(f"server : {server_bin}")
     print(f"tokenizer: {tok_bin or '(not built -- the live server /tokenize will be used)'}")
+    print(foreign_tool_note(binary, tok_bin, "llama-tokenize"), end="")
     print(f"expected ids ({id_field}, {n} of {len(expected)}): {expected_n}")
     if reference is None:
         print("reference: NONE on disk -- this run will report observed data and exit 3")
@@ -1571,6 +1628,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--boot-timeout", type=float, default=900.0, help="seconds to wait for the server")
     parser.add_argument("--gen-timeout", type=float, default=1800.0, help="seconds to wait for generation")
     parser.add_argument("--keep-logs", action="store_true", help="keep the captured logs on disk")
+    parser.add_argument(
+        "--server",
+        default="",
+        help="llama-server to launch (routes logits/server/auto). Default: the sibling of --binary, "
+             "<dir of --binary>/llama-server. A server on PATH is NEVER used implicitly; name it here "
+             "to run a different build on purpose",
+    )
 
     logits = parser.add_argument_group(
         "--route logits",
@@ -1633,8 +1697,19 @@ def main(argv: list[str] | None = None) -> int:
     if not model.is_file():
         return fail(EXIT_CANNOT_RUN, f"model is missing: {model}")
 
+    # Resolved once, logged once, and never an implicit PATH fallback (register 2125613719).
+    server: dict | None = None
+    if args.route in ("auto", "server", "logits"):
+        server = resolve_server(binary, args.server)
+        if server["path"] is not None:
+            print(f"server : {server['path']}   ({server['source']})")
+        else:
+            print(f"server : NONE USABLE -- expected {server['expected']}   (details in the FAIL below)")
+    elif args.server:
+        print("note: --server is ignored: route=cli launches no server")
+
     if args.route == "logits":
-        return run_logits(args, binary, model, oracle_path)
+        return run_logits(args, binary, model, oracle_path, server)
 
     oracle = load_oracle(oracle_path)
     prompt: str = oracle["prompt"]
@@ -1645,20 +1720,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"note: --n {n} exceeds the {len(expected)} ids in the oracle; comparing {len(expected)}")
         n = len(expected)
 
-    server_bin = sibling(binary, "llama-server")
+    server_bin = server["path"] if server is not None else None
+    server_reason = server["reason"] if server is not None else ""
     tok_bin = sibling(binary, "llama-tokenize")
+    print(foreign_tool_note(binary, tok_bin, "llama-tokenize"), end="")
 
     route = args.route
     if route == "auto":
         route = "server" if server_bin is not None else "cli"
         if server_bin is None:
-            print("note: no llama-server next to --binary; falling back to the cli route")
+            print("note: no usable llama-server; falling back to the cli route")
+            print(server_reason)
     if route == "server" and server_bin is None:
-        return fail(
-            EXIT_CANNOT_RUN,
-            "route=server but no llama-server next to --binary",
-            f"looked in {binary.parent}",
-        )
+        return fail(EXIT_CANNOT_RUN, "route=server but no llama-server to run", server_reason)
 
     log_dir = Path(tempfile.mkdtemp(prefix="dory-oracle-"))
     print(f"logs   : {log_dir}" + ("" if args.keep_logs else "  (deleted on exit; pass --keep-logs to keep)"))

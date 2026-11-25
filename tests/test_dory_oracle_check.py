@@ -182,3 +182,65 @@ def test_bf16_mode_rejects_a_non_tie_argmax_flip() -> None:
     relaxed, _ = oracle_check.bf16_relaxed_position_verdict(actual, expected, "logprobs", 0.5)
 
     assert not relaxed
+
+
+
+def make_executable(path: Path, body: str = "#!/bin/sh\nexit 3\n") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+def test_server_resolution_refuses_a_path_server_and_names_the_expected_sibling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    build = tmp_path / "build" / "bin"
+    binary = make_executable(build / "llama-cli")
+    elsewhere = tmp_path / "elsewhere"
+    path_server = make_executable(elsewhere / "llama-server")
+    monkeypatch.setenv("PATH", str(elsewhere))
+
+    got = oracle_check.resolve_server(binary)
+
+    assert got["path"] is None
+    assert str((build / "llama-server").resolve()) in got["reason"]
+    assert str(path_server.resolve()) in got["reason"]
+    assert "REFUSED" in got["reason"]
+    assert "--server" in got["reason"]
+
+
+def test_server_resolution_uses_the_sibling_of_binary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    build = tmp_path / "build" / "bin"
+    binary = make_executable(build / "llama-cli")
+    sibling_server = make_executable(build / "llama-server")
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    got = oracle_check.resolve_server(binary)
+
+    assert got["path"] == sibling_server.resolve()
+    assert got["source"] == "sibling of --binary"
+    assert got["reason"] == ""
+
+
+def test_server_override_is_deliberate_and_logged_once_at_startup(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    build = tmp_path / "build" / "bin"
+    binary = make_executable(build / "llama-cli")
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"not a real gguf")
+    other_server = make_executable(tmp_path / "other-build" / "llama-server")
+    oracle = tmp_path / "oracle.json"
+    oracle.write_text(json.dumps({"prompt": "hi", "prompt_ids": [1], "ids_loops4": [2]}), encoding="utf-8")
+
+    rc = oracle_check.main([
+        "--route", "logits", "--no-reference", "--boot-timeout", "2",
+        "--binary", str(binary), "--model", str(model), "--oracle", str(oracle),
+        "--server", str(other_server),
+    ])
+
+    captured = capsys.readouterr()
+    logged = [line for line in captured.out.splitlines() if line.startswith("server : ")]
+    assert logged == [f"server : {other_server.resolve()}   (--server override)"]
+    assert rc == oracle_check.EXIT_CANNOT_RUN  # the stand-in exits at once: never healthy
