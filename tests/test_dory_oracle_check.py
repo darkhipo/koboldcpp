@@ -692,8 +692,9 @@ def test_foreign_tool_note_names_a_tokenizer_that_is_not_the_build_s(tmp_path: P
 # ---------------------------------------------------------------------------
 
 
-def _fake_server(path: Path, help_text: str) -> Path:
-    path.write_text("#!/bin/sh\necho \"" + help_text + "\"\nexit 0\n", encoding="utf-8")
+def _fake_server(path: Path, help_text: str, exit_code: int = 0) -> Path:
+    script = "#!/bin/sh\necho \"" + help_text + "\"\nexit " + str(exit_code) + "\n"
+    path.write_text(script, encoding="utf-8")
     path.chmod(0o755)
     return path
 
@@ -734,3 +735,17 @@ def test_server_flag_probe_failure_keeps_the_flag(tmp_path: Path) -> None:
     missing = tmp_path / "no-such-server"
     assert missing.exists() is False
     assert oracle_check.server_flag_supported(missing, "--no-webui") is True
+
+
+def test_server_session_reads_help_even_when_the_server_exits_nonzero(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # ik_llama's server prints a full usage text on --help and then exits 1.  The
+    # text is still the answer: an unadvertised flag must not reach the launch line.
+    fake = _fake_server(tmp_path / "llama-server", "usage: --host --override-kv", exit_code=1)
+    session = oracle_check.ServerSession(fake, tmp_path / "m.gguf", 0, 0.2, tmp_path / "s.log", ctx=64)
+    with session:
+        pass
+    line = _launch_line(capsys)
+    assert "--no-webui" not in line
+    assert "--override-kv" in line

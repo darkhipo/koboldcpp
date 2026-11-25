@@ -395,15 +395,17 @@ def server_flag_supported(server_bin: Path, flag: str) -> bool:
 
     Forks differ: ik_llama's server has no ``--no-webui`` and rejects it as an
     invalid argument, which keeps the server from ever booting.  The answer is
-    read from ``--help`` once per binary.  When that probe cannot run or does not
-    answer within a few seconds, every flag is kept, which was the previous
+    read from ``--help`` once per binary, and the text is trusted whatever exit
+    code accompanies it: ik_llama's server prints a full usage text and then
+    exits 1.  Only when there is no text at all (the probe cannot run, or does
+    not answer within a few seconds) is every flag kept, which was the previous
     unconditional behaviour.
     """
     key = str(server_bin)
     if key not in _SERVER_HELP:
         try:
             probe = subprocess.run([key, "--help"], capture_output=True, text=True, timeout=5)
-            _SERVER_HELP[key] = None if probe.returncode != 0 else probe.stdout + probe.stderr
+            _SERVER_HELP[key] = (probe.stdout + probe.stderr).strip() or None
         except (OSError, subprocess.TimeoutExpired):
             _SERVER_HELP[key] = None
     text = _SERVER_HELP[key]
