@@ -10,8 +10,8 @@ section is the one in force.
 
 | What | Where |
 |---|---|
-| Submitted port | KoboldCpp PR https://github.com/LostRuins/koboldcpp/pull/2676, base `concedo` |
-| PR branch | `dory-kobold` on the fork `darkhipo/koboldcpp` - three commits: looped-nGPT arch support, unused `POST_*_NORM` enum removal, BF16 acceptance mode |
+| Submitted port | **ik_llama.cpp PR https://github.com/ikawrakow/ik_llama.cpp/pull/2992** (branch `dory-loop`, base `main`, awaiting the maintainer's re-review). KoboldCpp PR #2676 was CLOSED on 2026-11-25: its maintainer asks for LLM architectures to go upstream and takes them downstream from there. |
+| ik_llama rules | CONTRIBUTING tolerates AI use with disclosure and rejects bot accounts as authors; #2992 discloses. The red line still excludes ggml-org/llama.cpp. |
 | PR working tree | `/private/tmp/kobold-dory` (clean at the PR head) |
 | Port origin | `~/llama.cpp`, branch `dory-arch`; its remote `fork` points at `https://github.com/darkhipo/koboldcpp.git` |
 | Harness | `scripts/dory_oracle_check.py` and its tests, in the same PR |
@@ -122,6 +122,27 @@ The main entry is 2125613392; it stays open until #2676 merges.
 * `4934ef6025` - soul selection and inline cap scale with the model window.
 * `51da59f6dc` - ignore SIGTTOU before the TUI runs.
 * `acdab261bf` - truncation envelopes are unmistakably not entries.
+
+## ik_llama BUILD: TEACHER-FORCED ORACLE (2026-11-25)
+
+Ran against `llama-server` built from the reviewed head (`c074bf6e`, CPU), on the
+same loops=4 BF16 control and the same reference as the exact run above.
+
+- Shared-token logprob delta over all 16 positions: <= 0.278.
+- Strict SET/ORDER: FAIL at 3, 5, 15 -- the same three positions as every other port
+  of this graph. Position 5 is the same rank-5 swap (3367 against 3075, 0.042 apart).
+- BF16 tolerance verdict: PASS, 16 of 16.
+- Against the KoboldCpp build: the same top-5 id set and order at 16 of 16 positions;
+  worst port-to-port logprob difference 0.041. Two independent implementations agree
+  with each other far more closely than either deviates from the reference.
+- Provenance: that server prints token pieces and post-softmax probabilities, so ids
+  come from the model's tokenizer table (131,072 pieces, all distinct) and logprobs
+  are ln(p). Evidence: `/Volumes/Widekeep/oracle/dory-exact-ik-llama/`.
+
+The harness needed four fixes to run there, each a real difference in the fork: the
+server has no `--no-webui`; it exits 1 after printing `--help`; and it speaks the
+legacy `probs` shape with byte-level glyphs. All are on branch `agent-harness` (39 tests)
+and mirrored as one commit on `dory-loop-oracle` in the ik_llama fork, on top of the PR head.
 
 ## Lane results, 2026-11-25 (branches `agent-*`, pushed to the fork `darkhipo/koboldcpp`)
 
