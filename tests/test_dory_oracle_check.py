@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import http.server
 import importlib.util
 import json
+import threading
+import types
 from pathlib import Path
 
 import pytest
@@ -235,7 +238,7 @@ def test_server_override_is_deliberate_and_logged_once_at_startup(
     oracle.write_text(json.dumps({"prompt": "hi", "prompt_ids": [1], "ids_loops4": [2]}), encoding="utf-8")
 
     rc = oracle_check.main([
-        "--route", "logits", "--no-reference", "--boot-timeout", "2",
+        "--route", "logits", "--no-reference", "--boot-timeout", "2", "--checkpoint", "",
         "--binary", str(binary), "--model", str(model), "--oracle", str(oracle),
         "--server", str(other_server),
     ])
@@ -244,3 +247,270 @@ def test_server_override_is_deliberate_and_logged_once_at_startup(
     logged = [line for line in captured.out.splitlines() if line.startswith("server : ")]
     assert logged == [f"server : {other_server.resolve()}   (--server override)"]
     assert rc == oracle_check.EXIT_CANNOT_RUN  # the stand-in exits at once: never healthy
+
+
+
+# ---------------------------------------------------------------------------
+# checkpoint / resume  (register 2125613720)
+# ---------------------------------------------------------------------------
+
+PROMPT_IDS = [7493, 1395, 1032]
+EXPECTED = [1032, 1051, 1057, 1049]
+# 17 significant digits: anything short of an exact float round-trip shows up
+FAKE_TOPS = [
+    [(1032, -0.12345678901234567), (2007, -5.0179495811462401), (1659, -5.4067463874816895)],
+    [(1051, -0.015484467148780823), (1049, -4.4138092994689941)],
+    [(1057, -0.0010000000000000000218), (1049, -9.4299999999999997)],
+    [(1049, -0.00099999999999999), (1051, -8.1280000000000001)],
+]
+
+
+class FakeLlamaServer:
+    """In-process stand-in for llama-server: /health, /tokenize, 1-token /completion.
+
+    It listens on a real local port, so the script's HTTP path runs unchanged.
+    The process ServerSession launches is only a sleeper, so a run can also fail
+    before anything is collected.
+    """
+
+    def __init__(self, prompt_ids: list[int], tops: list[list[tuple[int, float]]]) -> None:
+        self.prompt_ids = list(prompt_ids)
+        self.tops = tops
+        self.requests: list[list[int]] = []
+        self.health_hits = 0
+        self.fail_at: set[int] = set()
+        outer = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args: object) -> None:
+                pass
+
+            def _send(self, payload: object, code: int = 200) -> None:
+                body = json.dumps(payload).encode("utf-8")
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self) -> None:
+                outer.health_hits += 1
+                self._send({"status": "ok"})
+
+            def do_POST(self) -> None:
+                request = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+                if self.path == "/tokenize":
+                    self._send({"tokens": outer.prompt_ids})
+                    return
+                outer.requests.append(list(request["prompt"]))
+                position = len(request["prompt"]) - len(outer.prompt_ids)
+                if position in outer.fail_at:
+                    self._send({"error": {"message": "injected failure"}}, 500)
+                    return
+                top = outer.tops[position]
+                self._send({"completion_probabilities": [{
+                    "id": top[0][0],
+                    "top_logprobs": [{"id": tid, "logprob": val} for tid, val in top],
+                }]})
+
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = int(self.httpd.server_address[1])
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+
+    def start(self) -> "FakeLlamaServer":
+        self.thread.start()
+        return self
+
+    def stop(self) -> None:
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.thread.join(timeout=5)
+
+
+def logits_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Everything --route logits needs with no real binary; run(name, *extra) drives main()."""
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")  # no host llama-tokenize: the live /tokenize is the route
+    build = tmp_path / "build"
+    make_executable(build / "llama-cli")
+    make_executable(build / "llama-server", "#!/bin/sh\nexec sleep 60\n")
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"gguf stand-in, version A")
+    oracle = tmp_path / "oracle.json"
+    oracle.write_text(json.dumps({
+        "prompt": "What is 17 multiplied by 23? The answer is",
+        "prompt_ids": PROMPT_IDS,
+        "ids_loops4": EXPECTED,
+    }), encoding="utf-8")
+    reference = tmp_path / "reference.json"
+    reference.write_text(json.dumps({
+        "quantity": "logprobs",
+        "source": "pytest",
+        "positions": [[[tid, val] for tid, val in top] for top in FAKE_TOPS],
+    }), encoding="utf-8")
+    fake = FakeLlamaServer(PROMPT_IDS, FAKE_TOPS).start()
+
+    def run(name: str, *extra: str, teacher_forced: bool = True) -> int:
+        argv = [
+            "--route", "logits", "--boot-timeout", "20",
+            "--binary", str(build / "llama-cli"), "--model", str(model),
+            "--oracle", str(oracle), "--server", str(build / "llama-server"),
+            "--port", str(fake.port), "--reference", str(reference),
+            "--checkpoint", str(tmp_path / f"{name}.checkpoint.json"),
+            "--dump-observed", str(tmp_path / f"{name}.observed.json"),
+        ]
+        return oracle_check.main(argv + (["--teacher-forced"] if teacher_forced else []) + list(extra))
+
+    return {"build": build, "model": model, "fake": fake, "run": run}
+
+
+def test_checkpoint_is_written_as_each_position_arrives(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ckpt_path = tmp_path / "ckpt.json"
+    on_disk_at_request: list[list[int]] = []
+
+    def fake_http_json(method: str, url: str, payload: dict | None = None, timeout: float = 60.0) -> dict:
+        assert url.endswith("/completion"), url
+        stored = json.loads(ckpt_path.read_text(encoding="utf-8"))["positions"]
+        on_disk_at_request.append([entry["position"] for entry in stored])
+        top = FAKE_TOPS[len(payload["prompt"]) - len(PROMPT_IDS)]
+        return {"completion_probabilities": [{
+            "id": top[0][0], "top_logprobs": [{"id": tid, "logprob": val} for tid, val in top],
+        }]}
+
+    monkeypatch.setattr(oracle_check, "http_json", fake_http_json)
+    ckpt = oracle_check.Checkpoint(ckpt_path, {"prompt_ids": PROMPT_IDS})
+    ckpt.flush()
+    session = types.SimpleNamespace(base="http://stand-in")  # never contacted: http_json is faked
+
+    collected, ids, err, code = oracle_check.collect_teacher_forced(
+        session, PROMPT_IDS, EXPECTED, 3, 5.0, sink=ckpt.add)
+
+    assert (err, code) == ("", oracle_check.EXIT_MATCH)
+    assert on_disk_at_request == [[], [0], [0, 1], [0, 1, 2]]  # every earlier position is already on disk
+    doc = json.loads(ckpt_path.read_text(encoding="utf-8"))
+    assert doc["format"] == oracle_check.CHECKPOINT_FORMAT
+    assert [entry["sampled"] for entry in doc["positions"]] == [top[0][0] for top in FAKE_TOPS]
+    assert [entry["top"] for entry in doc["positions"]] == [[[tid, val] for tid, val in top] for top in FAKE_TOPS]
+    assert [q.name for q in tmp_path.iterdir() if q.name != "ckpt.json"] == []  # no temp file left behind
+
+
+def test_identity_mismatch_names_every_differing_field(tmp_path: Path) -> None:
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"AAAA")
+    server = make_executable(tmp_path / "llama-server")
+    reference = tmp_path / "reference.json"
+    reference.write_text("{}", encoding="utf-8")
+
+    def identity(server_bin: Path = server, reference_path: Path | None = None, **mode: object) -> dict:
+        return oracle_check.run_identity(model, server_bin, reference_path, PROMPT_IDS, EXPECTED,
+                                         {"teacher_forced": True, "n": 4, "n_probs": 5, "tol": 0.5, **mode})
+
+    saved = identity()
+    assert oracle_check.identity_mismatches(saved, identity()) == []
+
+    model.write_bytes(b"BBBB")  # same path and size: only the bytes differ
+    diffs = oracle_check.identity_mismatches(
+        saved,
+        identity(server_bin=make_executable(tmp_path / "other" / "llama-server", "#!/bin/sh\nexit 4\n"),
+                 reference_path=reference, n_probs=6),
+    )
+
+    text = "\n".join(diffs)
+    for field in ("model.sha256", "server.path", "server.sha256", "reference", "mode.n_probs"):
+        assert field in text, text
+    for field in ("model.path", "model.size", "prompt_ids", "expected_ids", "mode.teacher_forced", "mode.tol"):
+        assert field not in text, text
+    assert "mtime" not in text, text  # a rewritten file is caught by its bytes, not its timestamp
+
+
+def test_resume_collects_only_the_missing_positions_and_reproduces_a_fresh_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    h = logits_harness(tmp_path, monkeypatch)
+    fake = h["fake"]
+    try:
+        assert h["run"]("fresh") == oracle_check.EXIT_MATCH
+
+        fake.fail_at.add(2)
+        assert h["run"]("interrupted") == oracle_check.EXIT_CANNOT_RUN
+        assert "--resume" in capsys.readouterr().err
+        partial = json.loads((tmp_path / "interrupted.checkpoint.json").read_text(encoding="utf-8"))
+        assert [entry["position"] for entry in partial["positions"]] == [0, 1]
+
+        fake.fail_at.clear()
+        fake.requests.clear()
+        assert h["run"]("resumed", "--resume", str(tmp_path / "interrupted.checkpoint.json")) == oracle_check.EXIT_MATCH
+    finally:
+        fake.stop()
+
+    # only the missing positions were requested, each on the saved prefix + expected suffix
+    assert fake.requests == [PROMPT_IDS + EXPECTED[:2], PROMPT_IDS + EXPECTED[:3]]
+    fresh = (tmp_path / "fresh.observed.json").read_text(encoding="utf-8")
+    resumed = (tmp_path / "resumed.observed.json").read_text(encoding="utf-8")
+    assert list(json.loads(resumed)) == list(json.loads(fresh))  # same keys in the same order
+    assert json.dumps(json.loads(resumed)) == json.dumps(json.loads(fresh))  # same floats, digit for digit
+
+
+def test_resume_is_refused_before_any_server_launch_when_identity_differs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    h = logits_harness(tmp_path, monkeypatch)
+    fake = h["fake"]
+    try:
+        fake.fail_at.add(3)
+        assert h["run"]("interrupted") == oracle_check.EXIT_CANNOT_RUN
+        hits, requests = fake.health_hits, list(fake.requests)
+
+        h["model"].write_bytes(b"gguf stand-in, version B")  # same size, different bytes
+        rc = h["run"]("resumed", "--resume", str(tmp_path / "interrupted.checkpoint.json"))
+    finally:
+        fake.stop()
+
+    captured = capsys.readouterr()
+    assert rc == oracle_check.EXIT_PLUMBING
+    assert "IDENTITY MISMATCH" in captured.err and "model.sha256" in captured.err
+    assert "VERDICT: PASS" not in captured.out and "BF16 VERDICT" not in captured.out
+    assert (fake.health_hits, fake.requests) == (hits, requests)  # nothing launched, nothing collected
+
+
+def test_resume_refuses_a_single_pass_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    h = logits_harness(tmp_path, monkeypatch)
+    fake = h["fake"]
+    try:
+        fake.fail_at.add(2)
+        assert h["run"]("interrupted") == oracle_check.EXIT_CANNOT_RUN
+        single_pass = tmp_path / "single-pass.checkpoint.json"
+        doc = json.loads((tmp_path / "interrupted.checkpoint.json").read_text(encoding="utf-8"))
+        doc["identity"]["mode"]["teacher_forced"] = False  # what a run without --teacher-forced writes
+        single_pass.write_text(json.dumps(doc), encoding="utf-8")
+        hits = fake.health_hits
+
+        rc = h["run"]("single", "--resume", str(single_pass), teacher_forced=False)
+    finally:
+        fake.stop()
+
+    captured = capsys.readouterr()
+    assert rc == oracle_check.EXIT_PLUMBING
+    assert "teacher-forced" in captured.err and "VERDICT: PASS" not in captured.out
+    assert fake.health_hits == hits  # refused before anything was launched
+
+
+def test_resume_from_an_unreadable_checkpoint_is_a_loud_plumbing_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    h = logits_harness(tmp_path, monkeypatch)
+    fake = h["fake"]
+    try:
+        garbage = tmp_path / "garbage.json"
+        garbage.write_text("not json", encoding="utf-8")
+
+        with pytest.raises(SystemExit) as raised:  # same convention as load_oracle() and load_reference()
+            h["run"]("garbage", "--resume", str(garbage))
+        hits = fake.health_hits
+    finally:
+        fake.stop()
+
+    assert raised.value.code == oracle_check.EXIT_PLUMBING
+    assert "checkpoint" in capsys.readouterr().err
+    assert hits == 0

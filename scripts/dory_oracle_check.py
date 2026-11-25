@@ -97,6 +97,7 @@ Stdlib only.  Builds nothing, edits nothing.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -109,6 +110,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 
 EXIT_MATCH = 0
@@ -1030,6 +1032,7 @@ def collect_chain(
     expected: list[int],
     n_probs: int,
     timeout: float,
+    sink: Callable[[int, dict], None] | None = None,
 ) -> tuple[list[dict] | None, list[int] | None, str, int]:
     """One request, n_predict = len(expected): the positions the port reaches."""
     body, err, code = logits_request(session, prompt_ids, len(expected), n_probs, timeout)
@@ -1040,6 +1043,9 @@ def collect_chain(
         return None, None, err, EXIT_PLUMBING
     ids = [p["sampled"] for p in parsed]
     print(f"server returned {len(parsed)} positions, {len(parsed[0]['top'])} candidates each")
+    if sink is not None:
+        for idx, entry in enumerate(parsed):
+            sink(idx, entry)  # on disk before anything else can fail
     return parsed, ids, "", EXIT_MATCH
 
 
@@ -1049,6 +1055,8 @@ def collect_teacher_forced(
     expected: list[int],
     n_probs: int,
     timeout: float,
+    sink: Callable[[int, dict], None] | None = None,
+    have: dict[int, dict] | None = None,
 ) -> tuple[list[dict] | None, list[int] | None, str, int]:
     """One 1-token request per position, context = prompt_ids + expected[:i].
 
@@ -1056,9 +1064,19 @@ def collect_teacher_forced(
     reference's ids instead of the port's), which is what makes "the top-5 at
     every position" mean every position rather than "every position up to the
     first flip".
+
+    'have' holds positions a checkpoint already collected: they are reused
+    verbatim (the very floats the server returned) and never re-requested, so
+    only the missing positions are asked for, each on its exact context.
+    'sink' sees every newly collected position before the next request is made.
     """
+    have = have or {}
     out: list[dict] = []
     for idx in range(len(expected)):
+        if idx in have:
+            out.append(have[idx])
+            print(f"  position {idx:2d}: {_fmt_top(have[idx]['top'])}   (reused from checkpoint)")
+            continue
         ctx_ids = list(prompt_ids) + list(expected[:idx])
         body, err, code = logits_request(session, ctx_ids, 1, n_probs, timeout)
         if body is None:
@@ -1068,6 +1086,8 @@ def collect_teacher_forced(
             return None, None, f"position {idx}: {err}", EXIT_PLUMBING
         out.append(parsed[0])
         print(f"  position {idx:2d}: {_fmt_top(parsed[0]['top'])}")
+        if sink is not None:
+            sink(idx, parsed[0])  # on disk before the next request can fail
     return out, [p["sampled"] for p in out], "", EXIT_MATCH
 
 
@@ -1393,6 +1413,219 @@ def report_argmax_agreement(
         print("      Check that dory.num_loops is read from the GGUF and used.")
 
 
+# --------------------------------------------------------------------------
+# checkpoint / resume  (register 2125613720)
+# --------------------------------------------------------------------------
+
+CHECKPOINT_FORMAT = "dory-oracle-checkpoint/1"
+DEFAULT_CHECKPOINT = str(Path(tempfile.gettempdir()) / "dory-oracle-checkpoint.json")
+HASH_CHUNK_BYTES = 16 << 20
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(HASH_CHUNK_BYTES), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def file_identity(path: Path) -> dict:
+    """sha256 is the identity; path, size and mtime are recorded for the reader.
+
+    Deliberately not size+mtime: a re-converted GGUF copied over the old one
+    with its timestamp preserved (cp -p, rsync -t, ditto) keeps both and changes
+    the bytes, and a resumed run must never splice positions across that.
+    Hashing reads the file once at about 2 GB/s (roughly 4 s for the 7.96 GB
+    BF16 GGUF), which is small next to loading it.
+    """
+    digest = sha256_file(path)
+    st = path.stat()
+    return {"path": str(path.resolve()), "size": st.st_size, "mtime_ns": st.st_mtime_ns, "sha256": digest}
+
+
+def run_identity(
+    model: Path,
+    server_bin: Path,
+    reference_path: Path | None,
+    prompt_ids: list[int],
+    expected: list[int],
+    mode: dict,
+) -> dict:
+    """What a checkpoint may never be reused across.
+
+    A collected position is a function of prompt_ids, the expected ids (the
+    teacher-forced context), the model bytes, the server bytes and the request
+    shape (teacher_forced, n_probs, ctx, ngl).  The reference path, n, tol and
+    the acceptance flag are bound as well, so a checkpoint from a differently
+    configured run is refused rather than quietly re-judged.
+    """
+    return {
+        "prompt_ids": list(prompt_ids),
+        "expected_ids": list(expected),
+        "model": file_identity(model),
+        "server": file_identity(server_bin),
+        "reference": None if reference_path is None else str(Path(reference_path).expanduser().resolve()),
+        "mode": dict(mode),
+    }
+
+
+# Recorded for the reader, never compared: the sha256 already pins the bytes, a
+# touched file is not a different file, and the same model bytes at a new path
+# are still the same model.  The SERVER path is compared as well: the checkpoint
+# contract names it, and it is the visible half of "which build was this".
+INFORMATIONAL_IDENTITY_FIELDS = ("model.path", "model.size", "model.mtime_ns", "server.size", "server.mtime_ns")
+
+
+def _identity_leaves(prefix: str, value, out: list[tuple[str, str]]) -> None:
+    if prefix in INFORMATIONAL_IDENTITY_FIELDS:
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _identity_leaves(f"{prefix}.{key}" if prefix else str(key), item, out)
+    else:
+        out.append((prefix, json.dumps(value, sort_keys=True)))
+
+
+def _short(value: str) -> str:
+    return value if len(value) <= 40 else value[:37] + "..."
+
+
+def identity_mismatches(saved, current) -> list[str]:
+    """One line per identity field that differs; an empty list means the same run."""
+    if not isinstance(saved, dict):
+        return [f"  identity: the checkpoint has no identity object (found {type(saved).__name__})"]
+    old: list[tuple[str, str]] = []
+    new: list[tuple[str, str]] = []
+    _identity_leaves("", saved, old)
+    _identity_leaves("", current, new)
+    old_map, new_map = dict(old), dict(new)
+    lines = []
+    for key, value in new:
+        if key not in old_map:
+            lines.append(f"  {key}: absent from the checkpoint, {value} in this run")
+        elif old_map[key] != value:
+            lines.append(f"  {key}: checkpoint {_short(old_map[key])}, this run {_short(value)}")
+    lines += [f"  {key}: checkpoint {_short(value)}, absent from this run" for key, value in old if key not in new_map]
+    return lines
+
+
+class Checkpoint:
+    """Every position reaches disk the moment it is collected (temp file + os.replace)."""
+
+    def __init__(self, path: Path | None, identity: dict, positions: dict[int, dict] | None = None) -> None:
+        self.path = path
+        self.identity = identity
+        self.positions: dict[int, dict] = dict(positions or {})
+        self.error = ""
+
+    @property
+    def enabled(self) -> bool:
+        return self.path is not None
+
+    def add(self, idx: int, entry: dict) -> None:
+        self.positions[idx] = {
+            "position": idx,
+            "sampled": entry["sampled"],
+            "top": [[tid, val] for tid, val in entry["top"]],
+        }
+        self.flush()
+
+    def flush(self) -> None:
+        """Atomically replace the checkpoint with everything collected so far."""
+        if self.path is None:
+            return
+        doc = {
+            "format": CHECKPOINT_FORMAT,
+            "identity": self.identity,
+            "positions": [self.positions[i] for i in sorted(self.positions)],
+        }
+        tmp = self.path.with_name(f"{self.path.name}.tmp-{os.getpid()}")
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with tmp.open("w", encoding="utf-8") as fh:
+                fh.write(json.dumps(doc, indent=2) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, self.path)
+        except OSError as exc:
+            self.error = f"{type(exc).__name__}: {exc}"
+            print(f"WARNING: could not write checkpoint {self.path} ({self.error}); "
+                  "--resume will not see this run", file=sys.stderr)
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
+def load_checkpoint(path: Path) -> dict:
+    """Parse and validate a checkpoint; any defect is a loud plumbing failure."""
+    def bad(why: str) -> SystemExit:
+        return SystemExit(fail(EXIT_PLUMBING, f"cannot resume from checkpoint {path}", why))
+
+    if not path.is_file():
+        raise bad("  the file does not exist")
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise bad(f"  not readable JSON: {exc}") from exc
+    if not isinstance(doc, dict) or doc.get("format") != CHECKPOINT_FORMAT:
+        found = doc.get("format") if isinstance(doc, dict) else type(doc).__name__
+        raise bad(f"  expected format {CHECKPOINT_FORMAT!r}, found {found!r}")
+
+    entries = doc.get("positions")
+    if not isinstance(entries, list):
+        raise bad("  'positions' is not a list")
+    positions: dict[int, dict] = {}
+    for item in entries:
+        if not isinstance(item, dict):
+            raise bad(f"  position entry is not an object: {item!r}")
+        idx, top, sampled = item.get("position"), item.get("top"), item.get("sampled")
+        well_formed = (
+            isinstance(idx, int) and not isinstance(idx, bool)
+            and isinstance(top, list) and bool(top)
+            and all(
+                isinstance(pair, list) and len(pair) == 2
+                and isinstance(pair[0], int) and not isinstance(pair[0], bool)
+                and isinstance(pair[1], (int, float)) and not isinstance(pair[1], bool)
+                for pair in top
+            )
+        )
+        if not well_formed or not (sampled is None or (isinstance(sampled, int) and not isinstance(sampled, bool))):
+            raise bad(f"  position entry is incomplete or malformed: {item!r}")
+        if idx in positions:
+            raise bad(f"  position {idx} appears twice")
+        # float(): the server's numbers come back as the very doubles it sent
+        positions[idx] = {"sampled": sampled, "top": [(pair[0], float(pair[1])) for pair in top]}
+    return {"identity": doc.get("identity"), "positions": positions}
+
+
+def resume_positions(path: Path, identity: dict, teacher_forced: bool, n: int) -> tuple[dict[int, dict], str]:
+    """Return ({position: entry}, "") to reuse, or ({}, why) when resume must be refused."""
+    doc = load_checkpoint(path)
+    diffs = identity_mismatches(doc["identity"], identity)
+    if diffs:
+        return {}, (
+            "IDENTITY MISMATCH -- the checkpoint was written by a different run, so its\n"
+            "  positions would splice one measurement into another:\n"
+            + "\n".join(diffs)
+            + "\n  Start fresh (drop --resume), or re-run with the checkpoint's own model, server,\n"
+            "  reference and flags."
+        )
+    stored = doc["positions"]
+    beyond = sorted(idx for idx in stored if idx >= n)
+    if beyond:
+        return {}, f"  the checkpoint holds positions {beyond} beyond the {n} this run compares"
+    if not teacher_forced:
+        return {}, (
+            "  the checkpoint is from a single-pass run (no --teacher-forced).  Those positions\n"
+            "  come from ONE decode pass: collecting the rest would start a new prefill, and the\n"
+            "  spliced artifact would not be what a single pass produces.  Re-run without --resume,\n"
+            "  or collect with --teacher-forced, where every position is its own full prefill."
+        )
+    return dict(stored), ""
+
+
 def run_logits(args, binary: Path, model: Path, oracle_path: Path, server: dict) -> int:
     """--route logits: the re-cut acceptance (top-5 SET/ORDER + |delta| tolerance)."""
     if server["path"] is None:
@@ -1424,6 +1657,35 @@ def run_logits(args, binary: Path, model: Path, oracle_path: Path, server: dict)
         widest = max(len(top) for top in reference["positions"].values())
         n_probs = max(n_probs, widest)
 
+    mode_flags = {
+        "teacher_forced": bool(args.teacher_forced),
+        "n": n,
+        "n_probs": n_probs,
+        "ctx": args.ctx,
+        "ngl": args.ngl,
+        "tol": args.tol,
+        "accept_bf16_noise": bool(args.accept_bf16_noise),
+    }
+    started = time.time()
+    identity = run_identity(model, server_bin, reference_path, prompt_ids, expected_n, mode_flags)
+    print(f"model sha256 : {identity['model']['sha256']}  "
+          f"({identity['model']['size']} bytes, hashed in {time.time() - started:.1f}s)")
+    print(f"server sha256: {identity['server']['sha256']}")
+
+    # A fresh run replaces any stale checkpoint before it collects anything.
+    resume_path = Path(args.resume).expanduser() if args.resume else None
+    if args.checkpoint is not None:
+        ckpt_path = Path(args.checkpoint).expanduser() if args.checkpoint else None
+    else:
+        ckpt_path = resume_path or Path(DEFAULT_CHECKPOINT)
+    have: dict[int, dict] = {}
+    if resume_path is not None:
+        have, refusal = resume_positions(resume_path, identity, args.teacher_forced, n)
+        if refusal:
+            return fail(EXIT_PLUMBING, "CHECKPOINT REFUSED -- not resuming", refusal)
+    ckpt = Checkpoint(ckpt_path, identity, have)
+    ckpt.flush()
+
     print(f"tokenizer: {tok_bin or '(not built -- the live server /tokenize will be used)'}")
     print(foreign_tool_note(binary, tok_bin, "llama-tokenize"), end="")
     print(f"expected ids ({id_field}, {n} of {len(expected)}): {expected_n}")
@@ -1434,6 +1696,9 @@ def run_logits(args, binary: Path, model: Path, oracle_path: Path, server: dict)
     else:
         print(f"reference: {reference['path']} (quantity={reference['quantity']})")
     print(f"n_probs: {n_probs}   tol: {args.tol}   ctx: {args.ctx}   ngl: {args.ngl}")
+    print(f"checkpoint: {ckpt.path if ckpt.enabled else '(disabled)'}"
+          + (f"   (resuming: {len(have)} of {n} positions reused, {n - len(have)} to collect)"
+             if resume_path is not None else ""))
 
     log_dir = Path(tempfile.mkdtemp(prefix="dory-oracle-"))
     print(f"logs   : {log_dir}" + ("" if args.keep_logs else "  (deleted on exit; pass --keep-logs to keep)"))
@@ -1468,15 +1733,20 @@ def run_logits(args, binary: Path, model: Path, oracle_path: Path, server: dict)
                 print("      shape (one full-prefill forward per position) or the delta measures")
                 print("      batching, not the graph.")
                 collected, ids, err, code = collect_teacher_forced(
-                    session, prompt_ids, expected_n, n_probs, args.gen_timeout)
+                    session, prompt_ids, expected_n, n_probs, args.gen_timeout,
+                    sink=ckpt.add, have=have)
             else:
                 mode = f"single pass: one request, n_predict={n}"
                 print(f"mode: {mode}")
                 collected, ids, err, code = collect_chain(
-                    session, prompt_ids, expected_n, n_probs, args.gen_timeout)
+                    session, prompt_ids, expected_n, n_probs, args.gen_timeout, sink=ckpt.add)
             if collected is None:
                 print(f"--- llama-server log tail ({session.log}) ---\n{tail(session.log, 60)}")
-                return fail(code, "cannot read top-5 candidates from llama-server", err)
+                detail = err
+                if ckpt.enabled and args.teacher_forced and ckpt.positions:
+                    detail += (f"\n  checkpoint {ckpt.path} holds {len(ckpt.positions)} of {n} position(s);"
+                               f" continue with: --resume {ckpt.path}")
+                return fail(code, "cannot read top-5 candidates from llama-server", detail)
 
             rows: list[dict] = []
             diverged_at: int | None = None
@@ -1523,8 +1793,14 @@ def run_logits(args, binary: Path, model: Path, oracle_path: Path, server: dict)
                     "n_probs": n_probs,
                 })
 
-            return report_logits(rows, reference, args.tol, mode, oracle_path,
-                                 id_field, observed, dump_path, args.accept_bf16_noise)
+            rc = report_logits(rows, reference, args.tol, mode, oracle_path,
+                               id_field, observed, dump_path, args.accept_bf16_noise)
+            if ckpt.enabled:
+                held = len(ckpt.positions)
+                print(f"\ncheckpoint: {ckpt.path}  ({held}/{n} positions"
+                      + ("" if held == n or not args.teacher_forced
+                         else f";  continue with: --resume {ckpt.path}") + ")")
+            return rc
     finally:
         if not args.keep_logs:
             shutil.rmtree(log_dir, ignore_errors=True)
@@ -1675,6 +1951,22 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="write the port's observed top-5 here (default: <tmp>/dory-observed-top5.json "
              "when there is no reference). Labelled self_observed -- it is NOT a reference.",
+    )
+    logits.add_argument(
+        "--checkpoint",
+        default=None,
+        help="write a checkpoint after every collected position so an interrupted run can be "
+             f"continued (default: {DEFAULT_CHECKPOINT}; pass an empty value to disable)",
+    )
+    logits.add_argument(
+        "--resume",
+        nargs="?",
+        const=DEFAULT_CHECKPOINT,
+        default=None,
+        help="continue a --teacher-forced run from this checkpoint: reuse the positions it already "
+             "holds, at the exact floats the server returned, and collect only the missing ones. "
+             "Refused unless the model, server, reference, prompt ids, expected ids and mode flags "
+             "all match (default path: the --checkpoint default)",
     )
     args = parser.parse_args(argv)
 
