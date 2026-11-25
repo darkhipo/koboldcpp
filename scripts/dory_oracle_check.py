@@ -386,6 +386,30 @@ def detok(base: str | None, ids: list[int]) -> str | None:
 # --------------------------------------------------------------------------
 
 
+# --help text per server binary; None means "unknown, keep every flag".
+_SERVER_HELP: dict[str, str | None] = {}
+
+
+def server_flag_supported(server_bin: Path, flag: str) -> bool:
+    """Whether this llama-server build accepts ``flag``.
+
+    Forks differ: ik_llama's server has no ``--no-webui`` and rejects it as an
+    invalid argument, which keeps the server from ever booting.  The answer is
+    read from ``--help`` once per binary.  When that probe cannot run or does not
+    answer within a few seconds, every flag is kept, which was the previous
+    unconditional behaviour.
+    """
+    key = str(server_bin)
+    if key not in _SERVER_HELP:
+        try:
+            probe = subprocess.run([key, "--help"], capture_output=True, text=True, timeout=5)
+            _SERVER_HELP[key] = None if probe.returncode != 0 else probe.stdout + probe.stderr
+        except (OSError, subprocess.TimeoutExpired):
+            _SERVER_HELP[key] = None
+    text = _SERVER_HELP[key]
+    return text is None or flag in text
+
+
 class ServerSession:
     """llama-server as a context manager: start, wait for /health, stop on exit."""
 
@@ -418,12 +442,15 @@ class ServerSession:
             "--host", "127.0.0.1",
             "--port", str(self.port),
             "-np", "1",
-            "--no-webui",
+        ]
+        # Optional flags follow the build: a fork that rejects one never boots.
+        if server_flag_supported(self.server_bin, "--no-webui"):
+            cmd.append("--no-webui")
+        if server_flag_supported(self.server_bin, "--override-kv"):
             # Belt and braces: the prompt is sent as an id array, so BOS cannot be
             # introduced anyway.  This keeps the vocab config honest regardless.
-            "--override-kv", "tokenizer.ggml.add_bos_token=bool:false",
-            *self.extra_args,
-        ]
+            cmd += ["--override-kv", "tokenizer.ggml.add_bos_token=bool:false"]
+        cmd += list(self.extra_args)
         print(f"launching: {' '.join(cmd)}")
         self._fh = self.log.open("wb")
         self.proc = subprocess.Popen(

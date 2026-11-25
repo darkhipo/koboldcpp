@@ -685,3 +685,52 @@ def test_foreign_tool_note_names_a_tokenizer_that_is_not_the_build_s(tmp_path: P
     note = oracle_check.foreign_tool_note(binary, foreign, "llama-tokenize")
 
     assert "found on PATH" in note and str(foreign) in note and "not part of" in note
+
+
+# ---------------------------------------------------------------------------
+# Optional server flags across forks
+# ---------------------------------------------------------------------------
+
+
+def _fake_server(path: Path, help_text: str) -> Path:
+    path.write_text("#!/bin/sh\necho \"" + help_text + "\"\nexit 0\n", encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+def _launch_line(capsys: pytest.CaptureFixture[str]) -> str:
+    lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith("launching:")]
+    assert len(lines) == 1
+    return lines[0]
+
+
+def test_server_session_omits_a_flag_the_build_does_not_advertise(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # ik_llama's server has no --no-webui and rejects it; the launch must not carry it.
+    fake = _fake_server(tmp_path / "llama-server", "usage: --host --port --override-kv")
+    session = oracle_check.ServerSession(fake, tmp_path / "m.gguf", 0, 0.2, tmp_path / "s.log", ctx=64)
+    with session:
+        pass
+    line = _launch_line(capsys)
+    assert "--no-webui" not in line
+    assert "--override-kv" in line
+
+
+def test_server_session_keeps_the_flags_a_build_advertises(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = _fake_server(tmp_path / "llama-server", "usage: --no-webui --override-kv --host")
+    session = oracle_check.ServerSession(fake, tmp_path / "m.gguf", 0, 0.2, tmp_path / "s.log", ctx=64)
+    with session:
+        pass
+    line = _launch_line(capsys)
+    assert "--no-webui" in line
+    assert "--override-kv" in line
+
+
+def test_server_flag_probe_failure_keeps_the_flag(tmp_path: Path) -> None:
+    # A binary that cannot even answer --help gets the previous unconditional behaviour.
+    missing = tmp_path / "no-such-server"
+    assert missing.exists() is False
+    assert oracle_check.server_flag_supported(missing, "--no-webui") is True
