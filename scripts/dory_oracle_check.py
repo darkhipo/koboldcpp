@@ -988,6 +988,45 @@ def find_reference(explicit: str) -> tuple[Path | None, list[str]]:
     return None, list(TOP5_REFERENCE_CANDIDATES)
 
 
+# Token string -> id for servers that report candidates by STRING (the legacy
+# "probs" shape); None until a model's tokenizer table has been read.
+_VOCAB: dict[str, int] | None = None
+
+
+def load_vocab(model: Path) -> dict[str, int]:
+    """Read the model's own tokenizer table: token string -> id (first occurrence wins)."""
+    import numpy as np
+    from gguf import GGUFReader
+
+    field = GGUFReader(model).fields["tokenizer.ggml.tokens"]
+    # A string array arrives as (length, bytes) pairs after the key header, so
+    # every uint8 part after the key's own bytes is one token, in id order.
+    tokens = [
+        bytes(part).decode("utf-8", errors="surrogateescape")
+        for part in field.parts[2:]
+        if getattr(part, "dtype", None) == np.uint8
+    ]
+    # Each token contributes one length part IMMEDIATELY followed by its bytes
+    # part; the array's own element count is a lone uint64 that nothing follows,
+    # so it is not counted.  A mis-parse breaks this pairing.
+    parts = field.parts[2:]
+    pairs = sum(
+        1
+        for index, part in enumerate(parts)
+        if getattr(part, "dtype", None) == np.uint64
+        and index + 1 < len(parts)
+        and getattr(parts[index + 1], "dtype", None) == np.uint8
+    )
+    if not tokens or len(tokens) != pairs:
+        raise ValueError(
+            f"tokenizer table is inconsistent: {len(tokens)} token strings against {pairs} length/bytes pairs"
+        )
+    vocab: dict[str, int] = {}
+    for token_id, token in enumerate(tokens):
+        vocab.setdefault(token, token_id)
+    return vocab
+
+
 def parse_positions(body: dict, want: int) -> tuple[list[dict] | None, str]:
     """Pull [{sampled, top:[(id, logprob)]}] out of one /completion response."""
     entries = None
@@ -1008,6 +1047,29 @@ def parse_positions(body: dict, want: int) -> tuple[list[dict] | None, str]:
             return None, f"{PROB_KEYS[0]}[{i}] is not an object"
         raw = entry.get("top_logprobs")
         if not isinstance(raw, list) or not raw:
+            legacy = entry.get("probs")
+            if isinstance(legacy, list) and legacy and isinstance(legacy[0], dict) and "tok_str" in legacy[0]:
+                # Legacy servers (ik_llama): token STRINGS and post-softmax
+                # PROBABILITIES.  The model's own tokenizer table recovers the id
+                # and ln(prob) is the logprob at full precision.
+                if _VOCAB is None:
+                    return None, (
+                        f"{PROB_KEYS[0]}[{i}] uses the legacy probs shape (tok_str/prob) but no "
+                        "tokenizer table was loaded from --model, so ids cannot be recovered"
+                    )
+                top = []
+                for cand in legacy[:want]:
+                    tid = _VOCAB.get(str(cand.get("tok_str")))
+                    prob = _as_float(cand.get("prob"))
+                    if tid is None or prob is None or prob <= 0:
+                        return None, (
+                            f"{PROB_KEYS[0]}[{i}] legacy candidate {cand!r} maps to no token id "
+                            "or carries no usable probability"
+                        )
+                    top.append((tid, max(math.log(prob), LOGP_FLOOR)))
+                sampled = _VOCAB.get(str(entry.get("content")))
+                parsed.append({"sampled": sampled, "top": top})
+                continue
             if isinstance(entry.get("top_probs"), list):
                 return None, (
                     f"{PROB_KEYS[0]}[{i}] returned 'top_probs', not 'top_logprobs': "
@@ -1755,6 +1817,13 @@ def run_logits(args, binary: Path, model: Path, oracle_path: Path, server: dict)
     tok_bin = sibling(binary, "llama-tokenize")
 
     oracle_data, prompt, prompt_ids, expected, id_field = load_logits_oracle(oracle_path)
+    global _VOCAB
+    try:
+        _VOCAB = load_vocab(model)
+    except (ImportError, KeyError, OSError, ValueError, TypeError, IndexError) as exc:
+        # Optional until a server answers in the legacy shape; that path says so loudly.
+        _VOCAB = None
+        print(f"note: legacy-probs adapter unavailable for this model: {exc}")
 
     n = args.n
     if n > len(expected):

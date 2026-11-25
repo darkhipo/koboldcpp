@@ -3,6 +3,7 @@ from __future__ import annotations
 import http.server
 import importlib.util
 import json
+import math
 import threading
 import types
 from pathlib import Path
@@ -749,3 +750,33 @@ def test_server_session_reads_help_even_when_the_server_exits_nonzero(
     line = _launch_line(capsys)
     assert "--no-webui" not in line
     assert "--override-kv" in line
+
+
+# ---------------------------------------------------------------------------
+# Legacy probability shape (ik_llama): token strings and probabilities
+# ---------------------------------------------------------------------------
+
+
+def test_parse_positions_converts_the_legacy_probs_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    # ik_llama's /completion answers with {"content", "probs": [{"tok_str", "prob"}]}:
+    # token strings and post-softmax probabilities, no ids and no logprobs.
+    monkeypatch.setattr(oracle_check, "_VOCAB", {"5": 1032, "1": 1044, "3": 1055})
+    body = {"completion_probabilities": [{"content": "5", "probs": [
+        {"tok_str": "5", "prob": 0.5}, {"tok_str": "1", "prob": 0.25}, {"tok_str": "3", "prob": 0.125}]}]}
+
+    parsed, err = oracle_check.parse_positions(body, 3)
+
+    assert err == "" and parsed is not None
+    assert parsed[0]["sampled"] == 1032
+    assert [tid for tid, _ in parsed[0]["top"]] == [1032, 1044, 1055]
+    assert [lp for _, lp in parsed[0]["top"]] == pytest.approx([math.log(0.5), math.log(0.25), math.log(0.125)])
+
+
+def test_parse_positions_refuses_a_legacy_candidate_it_cannot_map(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(oracle_check, "_VOCAB", {"5": 1032})
+    body = {"completion_probabilities": [{"content": "5", "probs": [
+        {"tok_str": "5", "prob": 0.5}, {"tok_str": "?", "prob": 0.1}]}]}
+
+    parsed, err = oracle_check.parse_positions(body, 2)
+
+    assert parsed is None and "maps to no token id" in err
