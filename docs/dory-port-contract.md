@@ -182,6 +182,23 @@ ACCEPTANCE, replacing the id list above:
    argmax equality.
 4. Optionally, a second oracle from a BF16 GGUF of the same model, where id
    equality IS meaningful.
+
+## ACCEPTANCE REVISED 2026-11-24 (BF16 primary, minimal relaxation)
+
+The BF16 control showed that exact SET/ORDER also rejects harmless numerical
+ordering noise. Use BF16 as the primary correctness gate and keep Q5_K_M as an
+informational quantisation report instead of requiring identical sets and ranks.
+
+Run `scripts/dory_oracle_check.py --accept-bf16-noise`. The strict SET/ORDER
+verdict remains printed. The BF16 verdict requires ALL of:
+1. Exact prompt_ids.
+2. Shared-token |delta_logprob| <= 0.5 at every compared position.
+3. Argmax agreement, except that a flip is allowed when the reference's top two
+   candidates are within 0.05 logprob and both remain in the port's top-5.
+4. No skipped positions. Set and order differences are reported, not failed.
+
+Q5_K_M is NOT declared passing under this rule: its larger deltas remain a
+separate quantisation measurement, not something hidden by the BF16 verdict.
 Any future "discriminating" prompt must be recorded with the margin between the
 variants it discriminates: a 0.008-logit margin discriminates BF16 from BF16, not
 a 5-bit quantisation.
