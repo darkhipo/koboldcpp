@@ -1142,58 +1142,57 @@ def compare_position(
 # BF16 relaxed rule, substitution bound (register 2125613721).  A candidate that
 # sits in ONE top-5 but not the other has no shared-token delta --
 # compare_position() differences only ids both lists have -- so the relaxed rule
-# used to accept it at ANY probability.  It is now acceptable only when it is
-# negligible against the position's top token, measured in the list that has it
-# (the reference for a candidate the port dropped, the port for one it added):
-#
-#     logprob(candidate) - logprob(top)  <=  BF16_UNSHARED_REL_LOGPROB
-#
-# i.e. at most BF16_UNSHARED_MAX_PROB_RATIO of the top token's probability.
-# Relative, not absolute: (a) logprob_i - logprob_top == logit_i - logit_top, so
-# the same number is measurable against a logits reference, where an absolute
-# probability is not; (b) across the 16 calibration positions the top token's
-# own probability ranges from 5.6% to 99.9%, so one absolute probability does not
-# mean the same thing at every position.  1% because a candidate that small
-# cannot reach the argmax even after the tolerated shifts (top token down 0.5,
-# candidate up 0.5: still under 3% of the top), and because in the calibration
-# data it sits in the empty gap between the two kinds of substitution actually
-# observed: rank-5 tail swaps at <= 0.013% of the top token, and swaps at the
-# flat, loops-discriminating position 5 at >= 74%.  The bound is deliberately
-# strict for flat positions: a top-5 boundary that is itself worth several
-# percent of the top token is reported, not excused.
-BF16_UNSHARED_MAX_PROB_RATIO = 0.01
-BF16_UNSHARED_REL_LOGPROB = math.log(BF16_UNSHARED_MAX_PROB_RATIO)
+# used to accept it at ANY probability.  It is now acceptable only as a BOUNDARY
+# SWAP: the entrant must sit within `tol` of the logprob of a candidate that left
+# the other list, and the number of entrants must equal the number of leavers.
+# Two near-equal tokens straddling rank 5 are noise; an entrant with nothing
+# comparable leaving is an intrusion, and a many-for-one change is not a swap.
+# The bound is the acceptance tolerance itself rather than a second, invented
+# threshold, and it reads the same against a logits reference because
+# logprob_i - logprob_j == logit_i - logit_j.
 
 
 def bf16_unshared_candidates(
     actual: list[tuple[int, float]],
     expected: list[tuple[int, float]],
-    max_rel_logprob: float | None = None,
+    tol: float,
 ) -> list[dict]:
-    """Candidates present in exactly one top-5, weighed against that list's top token.
+    """Pair every unshared candidate with a counterpart that left the other list.
 
-    Reference-only candidates come first (in reference order), then port-only
-    ones (in port order).  rel_logprob is value_i - value_top, which is the
-    logprob difference whether the values are logprobs or raw logits.
+    ``within_bound`` is True only for a pair whose logprobs are within ``tol``; an
+    unpaired entrant, an unpaired leaver, or unequal counts is an intrusion.
     """
-    if max_rel_logprob is None:
-        max_rel_logprob = BF16_UNSHARED_REL_LOGPROB
-    out: list[dict] = []
-    for side, own, other in (("reference only", expected, dict(actual)), ("port only", actual, dict(expected))):
-        top = own[0][1]
-        for tid, val in own:
-            if tid in other:
-                continue
-            rel = val - top
-            out.append({
-                "id": tid,
-                "side": side,
-                "value": val,
-                "rel_logprob": rel,
-                "p_ratio": math.exp(rel),
-                "within_bound": rel <= max_rel_logprob,
-            })
-    return out
+    actual_ids = {tid for tid, _ in actual}
+    expected_ids = {tid for tid, _ in expected}
+    entered = [(tid, lp) for tid, lp in actual if tid not in expected_ids]
+    left = [(tid, lp) for tid, lp in expected if tid not in actual_ids]
+    same_count = len(entered) == len(left)
+    unpaired = list(left)
+    entries: list[dict] = []
+    for tid, lp in entered:
+        nearest = min(unpaired, key=lambda other: abs(lp - other[1])) if unpaired else None
+        gap = abs(lp - nearest[1]) if nearest is not None else None
+        within = same_count and gap is not None and gap <= tol
+        if within:
+            unpaired.remove(nearest)
+        entries.append({
+            "id": tid,
+            "side": "port only",
+            "logprob": lp,
+            "counterpart": nearest[0] if nearest is not None else None,
+            "gap": gap,
+            "within_bound": bool(within),
+        })
+    for tid, lp in unpaired:
+        entries.append({
+            "id": tid,
+            "side": "reference only",
+            "logprob": lp,
+            "counterpart": None,
+            "gap": None,
+            "within_bound": False,
+        })
+    return sorted(entries, key=lambda entry: entry["id"])
 
 
 def bf16_relaxed_position_verdict(
@@ -1201,11 +1200,10 @@ def bf16_relaxed_position_verdict(
     expected: list[tuple[int, float]],
     quantity: str,
     tol: float,
-    unshared_rel_logprob_max: float | None = None,
 ) -> tuple[bool, dict]:
     """Accept numerical order noise without hiding argmax, large-delta or substitution errors."""
     cmp = compare_position(actual, expected, quantity, tol)
-    cmp["unshared"] = bf16_unshared_candidates(actual, expected, unshared_rel_logprob_max)
+    cmp["unshared"] = bf16_unshared_candidates(actual, expected, tol)
     if cmp["max_delta"] > tol:
         return False, cmp
     if any(not entry["within_bound"] for entry in cmp["unshared"]):
@@ -1421,21 +1419,24 @@ def report_logits(
             expected_top = reference["positions"][idx]
             relaxed, info = bf16_relaxed_position_verdict(row["actual"], expected_top, quantity, tol)
             if info["unshared"]:
-                state = "within bound" if all(entry["within_bound"] for entry in info["unshared"]) else "OVER BOUND"
-                print(f"[{idx:2d}] BF16 substitution check: {state}   "
-                      + "; ".join(f"id {entry['id']} ({entry['side']}) p/p_top={entry['p_ratio']:.4f}"
-                                  for entry in info["unshared"])
-                      + f"   [bound: <= {BF16_UNSHARED_MAX_PROB_RATIO:g}]")
+                state = "paired within tol" if all(entry["within_bound"] for entry in info["unshared"]) else "NOT PAIRED"
+                detail = ", ".join(
+                    f"id {entry['id']} ({entry['side']})"
+                    + (f" gap {entry['gap']:.3f} to id {entry['counterpart']}" if entry["gap"] is not None
+                       else " no counterpart")
+                    for entry in info["unshared"]
+                )
+                print(f"[{idx:2d}] BF16 substitution check: {state}   {detail}   [bound: gap <= {tol:g}]")
             if not relaxed:
                 relaxed_failures.append(idx)
         print()
         if relaxed_failures:
-            print(f"BF16 VERDICT: FAIL -- delta > {tol}, a non-tie argmax flip, or a top-5 substitution "
-                  f"above {BF16_UNSHARED_MAX_PROB_RATIO:.0%} of the top token at {relaxed_failures}")
+            print(f"BF16 VERDICT: FAIL -- delta > {tol}, a non-tie argmax flip, or an unshared top-5 "
+                  f"candidate with no counterpart within {tol:g} at {relaxed_failures}")
             return EXIT_MISMATCH
         print(f"BF16 VERDICT: PASS -- {compared} positions, shared-token delta <= {tol}; "
               "set/order are informational, argmax ties <= 0.05 logprob allowed; "
-              f"unshared candidates <= {BF16_UNSHARED_MAX_PROB_RATIO:.0%} of the top token")
+              f"every unshared candidate pairs within {tol:g} of a candidate that left the list")
         return EXIT_MATCH
 
     if failures:

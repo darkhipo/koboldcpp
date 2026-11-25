@@ -534,7 +534,7 @@ def test_bf16_mode_rejects_an_unexpected_candidate_with_real_probability() -> No
 
     assert cmp["max_delta"] <= 0.5 and cmp["argmax_match"]  # the hole the bound closes
     assert not relaxed
-    assert [entry["id"] for entry in info["unshared"] if not entry["within_bound"]] == [12]
+    assert [entry["id"] for entry in info["unshared"] if not entry["within_bound"]] == [12, 13]
 
 
 def test_bf16_mode_rejects_a_missing_reference_candidate_with_real_probability() -> None:
@@ -545,7 +545,7 @@ def test_bf16_mode_rejects_a_missing_reference_candidate_with_real_probability()
     relaxed, info = oracle_check.bf16_relaxed_position_verdict(actual, expected, "logprobs", 0.5)
 
     assert not relaxed
-    assert [entry["id"] for entry in info["unshared"] if not entry["within_bound"]] == [11]
+    assert [entry["id"] for entry in info["unshared"] if not entry["within_bound"]] == [11, 13]
 
 
 def test_bf16_mode_still_allows_tail_level_substitutions() -> None:
@@ -556,19 +556,17 @@ def test_bf16_mode_still_allows_tail_level_substitutions() -> None:
     relaxed, info = oracle_check.bf16_relaxed_position_verdict(actual, expected, "logprobs", 0.5)
 
     assert relaxed
-    assert [(entry["id"], entry["side"]) for entry in info["unshared"]] == [(13, "reference only"), (14, "port only")]
+    assert [(entry["id"], entry["side"], entry["counterpart"]) for entry in info["unshared"]] == [(14, "port only", 13)]
     assert all(entry["within_bound"] for entry in info["unshared"])
 
 
-def test_bf16_substitution_bound_is_one_percent_of_the_top_token() -> None:
-    # Exactly at the bound is acceptable (<=); a hair beyond it is not.
-    bound = oracle_check.BF16_UNSHARED_REL_LOGPROB
-    expected = [(10, -0.1), (11, -4.0), (13, -0.1 + bound)]
-    inside = [(10, -0.2), (11, -4.1), (14, -0.2 + bound - 0.01)]
-    outside = [(10, -0.2), (11, -4.1), (14, -0.2 + bound + 0.01)]
+def test_bf16_bound_is_the_acceptance_tolerance_between_paired_candidates() -> None:
+    # A boundary swap is acceptable while the entrant sits within tol of the leaver;
+    # a hair beyond tol makes the same swap an intrusion.
+    expected = [(10, -0.1), (11, -4.0), (13, -2.0)]
+    inside = [(10, -0.2), (11, -4.1), (14, -2.5)]
+    outside = [(10, -0.2), (11, -4.1), (14, -2.6)]
 
-    assert oracle_check.BF16_UNSHARED_MAX_PROB_RATIO == 0.01
-    assert bound < -4.6 and bound > -4.7
     assert oracle_check.bf16_relaxed_position_verdict(inside, expected, "logprobs", 0.5)[0]
     assert not oracle_check.bf16_relaxed_position_verdict(outside, expected, "logprobs", 0.5)[0]
 
@@ -581,7 +579,8 @@ def test_bf16_substitution_is_measured_against_a_logits_reference_too() -> None:
     relaxed, info = oracle_check.bf16_relaxed_position_verdict(actual, expected, "logits", 0.5)
 
     assert not relaxed
-    assert info["unshared"][1]["id"] == 12 and info["unshared"][1]["p_ratio"] > 0.4
+    unshared = {entry["id"]: entry for entry in info["unshared"]}
+    assert unshared[12]["counterpart"] == 13 and unshared[12]["gap"] > 0.5
 
 
 def test_bf16_mode_reports_a_substitution_failure_through_report_logits(capsys: pytest.CaptureFixture[str]) -> None:
