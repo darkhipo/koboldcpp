@@ -50,7 +50,7 @@ All measured 2026-11-24 on CPU against the 16-position teacher-forced oracle.
 | Loop agreement, shipped Q5_K_M | 15/16 against loops = 4, 6/16 against loops = 1 |
 | `--accept-bf16-noise`, BF16 control | **PASS 16/16 printed - NOT final** (see limitation 2) |
 | Upstream llama.cpp build of the same port | fails the **identical 3 BF16 positions with identical logits** |
-| Oracle tests | 13/13 |
+| Oracle + tensor-coverage tests | 13 passed in total (10 oracle, 3 tensor coverage) |
 
 The upstream-build row is the answer to "is this a KoboldCpp graph defect?": no.
 Backend probes (`-fa off`, `--no-repack`, `--device none`, `--no-op-offload`)
@@ -122,3 +122,25 @@ The main entry is 2125613392; it stays open until #2676 merges.
 * `4934ef6025` - soul selection and inline cap scale with the model window.
 * `51da59f6dc` - ignore SIGTTOU before the TUI runs.
 * `acdab261bf` - truncation envelopes are unmistakably not entries.
+
+## Lane results, 2026-11-25 (branches `agent-*`, pushed to the fork `darkhipo/koboldcpp`)
+
+None of this is in PR #2676 or PR #2674 yet.
+
+* `agent-harness` - five commits hardening the oracle: no silent PATH fallback
+  for `llama-server` (use `--server`), per-position checkpoint and `--resume`, a
+  bound on top-5 substitutions in BF16 mode, a loud non-BF16 provenance refusal.
+  30 tests. The bound flips the BF16 verdict to 15/16: position 5 is a rank-5
+  swap (3367 against 3075, 0.038 logprob apart), which the mode as written
+  tolerates without limit. Which bound to adopt is an OPEN contract decision.
+* `agent-metal` - `tools/metal_probe_watchdog.py` (11 tests) and
+  `docs/dory-metal-memory.md`: the 106 GB is either a compute pool with reuse
+  defeated (scales with `-ub`) or context-sized attention scores plus KV (scales
+  with `-c`); an init-only run separates them. RSS under-reports Metal memory.
+* `agent-converter` - `scripts/dory_compare_gguf.py` and
+  `docs/dory-converter-verification.md`: 507/507 names, zero shape mismatches.
+* `agent-mmap-runtime` - `tools/madvise_runtime_proof.py` and
+  `docs/notes-ci-status.md` for PR #2674; the runtime proof has not been run.
+* `agent-fullprecision` - `run_bf16_full_when_memory_allows.py`, a gated runner
+  for the full-precision BF16 rerun (waits for swap used <= 16 GB, then builds
+  `llamaserver` if needed, then runs the oracle once and writes a result file).
