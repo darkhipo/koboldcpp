@@ -2042,7 +2042,7 @@ def main(argv: list[str] | None = None) -> int:
         "--accept-bf16-noise",
         action="store_true",
         help="BF16-only acceptance: shared-token delta <= tol plus argmax, allowing <=0.05 ties; a candidate "
-             "in only one top-5 must be <= 1% of the top token; strict SET/ORDER remains printed",
+             "in only one top-5 must be <= 1%% of the top token; strict SET/ORDER remains printed",
     )
     logits.add_argument(
         "--dump-observed",

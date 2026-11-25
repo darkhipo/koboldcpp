@@ -655,3 +655,34 @@ def test_bf16_flag_on_an_id_route_is_refused_rather_than_ignored(tmp_path: Path,
     captured = capsys.readouterr()
     assert rc == oracle_check.EXIT_PLUMBING
     assert "--accept-bf16-noise" in captured.err and "--route logits" in captured.err
+
+
+
+# ---------------------------------------------------------------------------
+# follow-ups found by the CLI smoke run
+# ---------------------------------------------------------------------------
+
+
+def test_help_renders_every_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    # argparse %-formats help text, so a bare percent sign in any help string breaks --help.
+    with pytest.raises(SystemExit) as raised:
+        oracle_check.main(["--help"])
+
+    captured = capsys.readouterr()
+    assert raised.value.code == 0
+    for flag in ("--server", "--checkpoint", "--resume", "--accept-bf16-noise"):
+        assert flag in captured.out
+    assert "1% of the top token" in captured.out
+
+
+def test_foreign_tool_note_names_a_tokenizer_that_is_not_the_build_s(tmp_path: Path) -> None:
+    build = tmp_path / "build"
+    binary = make_executable(build / "llama-cli")
+    own = make_executable(build / "llama-tokenize")
+    foreign = make_executable(tmp_path / "homebrew" / "llama-tokenize")
+
+    assert oracle_check.foreign_tool_note(binary, None, "llama-tokenize") == ""
+    assert oracle_check.foreign_tool_note(binary, own, "llama-tokenize") == ""
+    note = oracle_check.foreign_tool_note(binary, foreign, "llama-tokenize")
+
+    assert "found on PATH" in note and str(foreign) in note and "not part of" in note
