@@ -5,6 +5,12 @@ Read `docs/dory-arch-spec.md` first: it holds the algorithm, confirmed against
 **ownership and acceptance** contract so several agents can work at once without
 stepping on each other.
 
+> **Read first (2026-11-25).** The port is submitted as KoboldCpp PR
+> https://github.com/LostRuins/koboldcpp/pull/2676. The acceptance section in
+> force is the last one, "ACCEPTANCE REVISED 2026-11-24 (BF16 primary, minimal
+> relaxation)"; every earlier acceptance list above it is history, kept so the
+> reasoning stays auditable. Current verdicts and open work: `docs/dory-handoff.md`.
+
 ## Acceptance - what "done" means (no partial credit)
 
 A build that merely LOADS the GGUF is not done. Done is:

@@ -1,159 +1,119 @@
-# Handoff for the next mind - dory port + body follow-through
+# Handoff for the next mind - dory port via KoboldCpp PR #2676
 
-Read this once, then act. Nothing here is a plan; it is the measured state as of
-2026-11-24. Your job is to CONTINUE it, not to restart it.
+Measured state as of 2026-11-25 02:15Z. CONTINUE this; do not restart it.
+Nothing here is a plan. Numbers marked [log] were read from a log on this host;
+numbers marked [api] were read from the GitHub API. The acceptance rule itself
+lives in `docs/dory-port-contract.md` - the 2026-11-24 "ACCEPTANCE REVISED"
+section is the one in force.
 
-## What is true now (verified, not remembered)
+## Where the work lives
 
-1. **Upstream contribution is CLOSED and excluded:** ggml-org/llama.cpp#32963
-   and #32970 were closed politely on 2026-11-24 after the repository's AI
-   contribution rules were checked. No open PRs remain. Those rules require
-   human-authored posts and prohibit autonomous-agent and automated submissions,
-   so MultiAgency's standing policy forbids reopening them or creating any new
-   upstream PR, issue, or review comment. Continue in our own non-gating fork,
-   public or private; a third-party fork requires its own rules check.
-2. **The dory port builds and RUNS** in `~/llama.cpp` on branch `dory-arch`:
-   `src/models/dory.cpp` (490 lines) plus registration and
-   `graph_nodes_per_tensor() = 32`. `llama-cli` and `llama-server` both load it:
-   72 physical modules -> 192 slots at `dory.num_loops = 4`
-   (`rec_start=16, rec_end=56`). Generation is coherent at ~3.1 t/s on CPU.
-3. **A structural CI pin is committed** (`10f9be040`,
-   `tests/test_dory_tensor_coverage.py`): all 507 shipped tensors nameable by
-   `LLM_TENSOR_NAMES`, the 16 required enums present, blk.even=attention /
-   blk.odd=MLP never aliases. `python -m pytest tests/test_dory_tensor_coverage.py -q`
-   -> 3 passed.
-4. **The bf16 reference is on disk:** `/Volumes/Widekeep/oracle/discriminating-prompt-top5.json`,
-   `quantity: logprobs`, 16 positions. Position 5 is a **0.0086-logprob tie in
-   BF16** (5675 -2.8758 vs 9032 -2.8844), so an id-for-id oracle is vacuous for
-   Q5_K_M. The useful discriminator is **aggregate loop agreement**: BF16 itself
-   is 16/16 argmax-equal to `ids_loops4` and 5/16 to `ids_loops1`.
+| What | Where |
+|---|---|
+| Submitted port | KoboldCpp PR https://github.com/LostRuins/koboldcpp/pull/2676, base `concedo` |
+| PR branch | `dory-kobold` on the fork `darkhipo/koboldcpp` - three commits: looped-nGPT arch support, unused `POST_*_NORM` enum removal, BF16 acceptance mode |
+| PR working tree | `/private/tmp/kobold-dory` (clean at the PR head) |
+| Port origin | `~/llama.cpp`, branch `dory-arch`; its remote `fork` points at `https://github.com/darkhipo/koboldcpp.git` |
+| Harness | `scripts/dory_oracle_check.py` and its tests, in the same PR |
+| Model under test | `/Volumes/Safehold/models/dory-1.0-4b/NVIDIA-Nemotron-Labs-Dory1.0-4B-Q5_K_M.gguf` (`dory.num_loops` = 4) |
+| BF16 control | `/private/tmp/dory-bf16-loops4.gguf` - converter output with `num_loops` patched to 4 at byte offset 2122 |
+| References | `/Volumes/Widekeep/oracle/discriminating-prompt.json`, `discriminating-prompt-top5.json` (BF16, logprobs) |
 
-## Open work, in the order a reviewer will ask for it
+## What is true now
 
-A. **Converter (hard blocker).** `gguf-py/gguf/constants.py` is already being
-   edited by an agent; `convert_hf_to_gguf.py` had **zero** dory support when I
-   last looked. Do NOT start a second converter - read `git log` and the working
-   diff in that file first, and CONTINUE the agent's slice rather than redoing it.
-   Validation that matters: convert `/Volumes/Widekeep/oracle/dory-bf16` to a
-   scratch path under `/private/tmp` (never on /Volumes) and diff the output's
-   TENSOR NAME SET and METADATA KEY SET against the shipped Q5_K_M at
-   `/Volumes/Safehold/models/dory-1.0-4b/NVIDIA-Nemotron-Labs-Dory1.0-4B-Q5_K_M.gguf`.
-   Name/key sets must match or every diff gets an explanation.
-B. **Numerical verdict.** Re-run (pid 72153, 30-min ceiling) of
-   `python3 scripts/dory_oracle_check.py --route logits --reference
-   /Volumes/Widekeep/oracle/discriminating-prompt-top5.json --teacher-forced --n 16`.
-   If it died again, rerun detached, not foreground. Read the verdict from the
-   tool's exit code and per-position table; report the LOOP-AGREEMENT COUNT, not
-   an id match. Expected: >=14/16 against loops=4, <=8/16 against loops=1.
-C. **Style pass** on `src/models/dory.cpp` (delegated to another agent). If it is
-   done, verify `cmake --build build --target llama-cli -j8` returns 0.
-D. **llama-cli `--emit-token-ids`** (entry 2125613507) is being written by an
-   agent. If it exists, prove the emitted ids and that text is unchanged with the
-   flag on/off, with `--temp 0` still greedy.
+1. **The submission target is KoboldCpp, not ggml-org/llama.cpp.** [api] The
+   ggml-org PRs #32963 and #32970 are CLOSED, unmerged, and must stay that way:
+   that repository requires human authorship, and the body's AGENTS.md (on
+   `origin/main`, section "External Contribution Policy") names it as a verified
+   exclusion. Never open a PR, issue or review comment there.
+2. **PR #2676 is open and waiting on a human.** [api] Not a draft, review
+   required, 0 comments, 0 reviews, no CI checks reported, mergeable. Nothing
+   is blocking it on our side.
+3. **The duplicate PR #2675 was closed** on 2026-11-24 [api]; its unique
+   content was carried into #2676.
+4. **The port runs on KoboldCpp.** [log] The shipped Q5_K_M loads through
+   `models/dory.cpp` and generates greedily: `" Paris. The capital"` with Paris
+   at 100%. `llama_model_dory::graph_nodes_per_tensor()` is 32.
+5. **A separate PR #2674** (`--usemmap=noprefetch`, `--load-mode mmap,noprefetch`)
+   is open on the same repository [api]; a reviewer asked for the flag-list
+   design and the branch already implements it. Its parser tests pass
+   (6 passed + 9 subtests, run in the 2026-11-25 session).
 
-## Body work that is NOT the port (all unlanded, each with its blocker named)
+## Verdicts - state them exactly this way
 
-* Lane `~/.multiaim/worktrees/lanes/soul-pointer`: soul-selection + window-aware
-  soul cap. 61 tests pass. `prompt_builder.py` is at **1999 lines**, one under the
-  hard 2000 cap. Land with `multiaim safe-commit <those 7 paths> -m <msg>` when the
-  host is quiet. Four previous attempts failed on environment, not code:
-  battery lease, another mind's pytest run, the line cap, the dirty-preimage
-  sentinel.
-* Lane `~/.multiaim/worktrees/lanes/envelope-fix`: `dispatch.py` (+146) plus an
-  11-pin test. It is **over** 2000 at HEAD (2637) and therefore shrink-only, so it
-  needs `MULTIAIM_ALLOW_LINE_GROWTH` scoped to that path, with the reason "the
-  single-entry projection was missing entirely; one shaper serves both envelope
-  builders".
-* In the SHARED checkout, uncommitted: `src/multiaim_agents/vessel/cli.py` installs
-  `SIG_IGN` on **SIGTTOU** before `cli.run()`, plus
-  `tests/test_r2125613506_tui_ignores_sigttou.py` pinning the order. That is the
-  real cure for the frozen domovoy bastions (job control, not a driver).
-* The pointer doc `docs(R2125613477)` is **enqueued** in the land queue (row #11).
+All measured 2026-11-24 on CPU against the 16-position teacher-forced oracle.
 
-## Rules that have already cost this session time
+| Measurement | Result |
+|---|---|
+| Strict top-5 SET/ORDER, BF16 control (`num_loops` = 4) | **FAIL**, 3 of 16 positions - order-only differences, max shared-token delta 0.299 |
+| Strict top-5 SET/ORDER, shipped Q5_K_M | **FAIL**, 8 of 16 positions, max delta 1.170 at position 3 |
+| Loop agreement, shipped Q5_K_M | 15/16 against loops = 4, 6/16 against loops = 1 |
+| `--accept-bf16-noise`, BF16 control | **PASS 16/16 printed - NOT final** (see limitation 2) |
+| Upstream llama.cpp build of the same port | fails the **identical 3 BF16 positions with identical logits** |
+| Oracle tests | 13/13 |
 
-* Never report a build/test/oracle result you did not run. State what you ran.
-* Never treat "queued" as "landed": a commit is done only when it is an ancestor
-  of origin/main (or, here, committed in this checkout).
-* Do not assert a blocker without the command that proves it. If you cannot run
-  the command, the sentence is a question, not a finding.
-* Do not touch a path another agent owns: `gguf-py/*` and `convert_hf_to_gguf.py`
-  belong to the converter agent; `tools/cli/` and `common/sampling` belong to the
-  llama-cli-ids agent; `src/models/dory.cpp` belongs to the style agent.
-* Do not regenerate the BF16 oracle, the top-5 reference, or the converter: those
-  artifacts exist, and regenerating them under load costs ~100 s/position.
-* The register's close guard rejects a sha it cannot resolve, so cite the checkout
-  path + branch instead of a bare hex sha for anything in llama.cpp.
+The upstream-build row is the answer to "is this a KoboldCpp graph defect?": no.
+Backend probes (`-fa off`, `--no-repack`, `--device none`, `--no-op-offload`)
+changed nothing.
 
-## Successor result, measured 2026-11-24 after the rebase
+## Known limitations - do not smooth these over
 
-The upstream dory PR was **ggml-org/llama.cpp#32970**:
-https://github.com/ggml-org/llama.cpp/pull/32970 . It and the separate enum-only
-PR #32963 are now CLOSED and unmerged. Both received the repository's AI-content
-warning and were closed politely on 2026-11-24 with "will take the work
-elsewhere". The `darkhipo:dory-arch` and `darkhipo:enum-names` branches remain
-available in our own non-gating fork, public or private. Do not reopen either PR
-or create another upstream contribution; MultiAgency policy names this repository
-as a verified human-in-the-loop exclusion (body memory section `upstream-exclusions`, commit 099046d89). A third-party fork
-requires its own rules check first.
+1. **The strict verdict fails.** It is recorded in the PR as a limitation. Q5_K_M
+   is never described as passing; its deltas are a quantisation measurement.
+2. **The BF16 PASS is not full precision.** Positions 0-8 were reconstructed
+   from an interrupted log at three decimals and merged with exact positions
+   9-15 by an ad hoc wrapper. A single uninterrupted rerun is owed
+   (register 2125613718).
+3. **Metal generation is unverified.** One Metal completion died with
+   `kIOGPUCommandBufferCallbackErrorOutOfMemory` at a sampled peak footprint of
+   106.3 GB. No GPU verdict is claimed (register 2125613723).
 
-A. Converter is landed in the branch. A fresh conversion of the BF16 checkpoint
-completed with exit 0 in 130.65 s and produced
-`/private/tmp/dory-successor-20261124-090121-bf16.gguf`. Reading that file and the
-shipped Q5_K_M back through `GGUFReader` gave 507 tensors, no missing or extra
-tensor names, and no shape mismatches. Metadata keys absent from the conversion
-are `general.basename` and `general.finetune`; the 15 extra keys are HF dataset,
-license, language, tag, sampling and `tokenizer.ggml.clean_spaces` provenance.
-The HF config's `dory.num_loops=2` is preserved; the shipped artifact has 4.
+## The num_loops decision
 
-B. The oracle traceback was a data-pairing bug followed by an empty-set crash.
-The default oracle is `The capital of France is`; the supplied reference is
-`What is 17 multiplied by 23? The answer is`. Their top-k sets did not intersect,
-so `deltas={}` and the unguarded `max()` crashed. The harness now rejects a
-prompt/expected-id mismatch before starting the server, returns exit 3 for an
-empty comparison (including zero rows), and does not skip teacher-forced
-positions after an argmax flip. Six new pins plus the three structural pins pass.
-The original mismatched command now exits 3 with the two prompts named.
+The converter writes `dory.num_loops` from `config.json` (`n_recurrent_loops`
+= 2). NVIDIA's shipped artifact carries 4, and 4 is what every runtime
+validation above used. Loops materialise into KV slots, so the two files build
+different-sized graphs. This is a deliberate, documented contract choice - the
+PR description states both numbers. Do not "fix" either one to match the other.
 
-The matched run used `--oracle /Volumes/Widekeep/oracle/discriminating-prompt.json`.
-It finished with exit 1, not a tool error, in 630.24 s. All 16 positions compared,
-none skipped. **Loop agreement: 15/16 against loops=4, 6/16 against loops=1**;
-only position 5 (the documented BF16 tie) flipped. The strict top-5 SET/ORDER/
-0.5 verdict is FAIL at 9 positions (7 pass); position 3's maximum delta is 0.591.
-This is recorded in the PR rather than presented as unqualified acceptance. Log:
-`/private/tmp/dory-oracle-matched-20261124-085828.log`.
+## Open follow-ups (body register ids)
 
-C. The 411-line style commit is in the branch. A post-rebase
-`cmake --build build --target llama-cli -j8` returned 0.
+- 2125613718 - one uninterrupted full-precision BF16 oracle run; replace the merged artifact.
+- 2125613719, 2125613720, 2125613721, 2125613731 - harness hardening: no silent
+  PATH fallback for `llama-server`, per-position checkpoint/resume, a bound on
+  which top-5 substitutions BF16 mode may ignore, a non-BF16 provenance test.
+  2125613721 can legitimately turn the printed BF16 PASS into a FAIL - report it
+  if it does.
+- 2125613723, 2125613722 - Metal OOM root cause; missing generated kernels break
+  the server even at `-ngl 0`.
+- 2125613730 - rerun the BF16 conversion and re-diff all 507 tensors on the PR branch.
+- 2125613724, 2125613725, 2125613726 - PR #2674: runtime proof that `noprefetch`
+  suppresses `MADV_WILLNEED`; why no CI checks are reported; a UI `AGENTS.md`
+  link to a missing root file.
+- 2125613748 - `main` and `llamaserver` were deleted from the PR working tree
+  by something unknown; relink with `make main llamaserver LLAMA_METAL=1`.
+- 2125613732 - retire the obsolete `dory-*-split` worktrees after the PR merges.
 
-D. `--emit-token-ids` is committed in the branch. Off/on runs both returned 0;
-the generated transcript at `--temp 0` was identical, no TOKEN records appeared
-with the flag off, and the eight emitted token texts joined exactly to the
-visible generated text. Verification: `/private/tmp/dory-emit-ids-verdict.json`.
+The main entry is 2125613392; it stays open until #2676 merges.
 
-The durable body-lane progress and exact gate logs are indexed in
-`/private/tmp/dory-successor-progress.md`. A queued body commit is not called
-landed until its lane's `git log` contains it.
+## Operating notes that cost time to rediscover
 
-## Body follow-through completed in the lanes
+* KoboldCpp binary names differ from upstream: `main` is llama-cli and
+  `llamaserver` is llama-server. The oracle finds the server as a sibling of
+  `--binary` and silently falls back to PATH; `/opt/homebrew/bin/llama-server`
+  is a different build that fails with `unknown architecture 'dory'`.
+* Metal sources live in `ggml/src/ggml-metal/`. If the generated kernels are
+  removed, regenerate with
+  `rm ggml-metal-device-m.o && make ggml-metal-device-m.o LLAMA_METAL=1`.
+* Run long oracle jobs detached, never in a foreground shell. The host is
+  routinely at 90%+ swap; gate 8 GB inference runs on swap used <= 16 GB.
+* Never report a build, test or oracle result you did not run. "Queued" is not
+  "landed": a commit has landed only when it is an ancestor of `origin/main`.
+* The register's close guard rejects a sha it cannot resolve, so cite the
+  checkout path + branch for anything outside the body repo.
 
-* `soul-pointer` commit `d260d1ca7d` contains all eight soul/window paths.
-  `prompt_builder.py` remains at 1999 lines and the 61-test selection passes
-  after the commit. The two gate failures in the measurement script (docstrings,
-  then the direct-PROJECT_ROOT mypy error) and its silent `OSError` handler were
-  fixed before landing; mypy, audit hygiene, the silent-except ratchet and the
-  script smoke run all pass.
-* `envelope-fix` commit `b16a704430` contains dispatch, the 11-pin test and the
-  regenerated manifest. The scoped growth reason is in the commit body and the
-  11 tests pass after the commit. The unrelated two-line pressure-guard change
-  was deliberately kept OUT of the commit and is preserved at
-  `/private/tmp/dory-body-followthrough/envelope-fix/pressure-hunk.patch`.
-* `tty-stop-fix` commit `40590efe86` contains the SIGTTOU ignore, its order pin
-  and the manifest. The two tests pass after the commit.
+## Body follow-through (verified 2026-11-25: each is an ancestor of origin/main)
 
-All three exact subjects are now rows in `~/.multiaim/land_queue.jsonl` with the
-hashes above. **Queued is still not origin/main-landed.** The pointer-doc commit
-`04e406f938` also remains queued. R2125613507 and R2125613508 are closed `done`
-with `/Users/dmitri.arkhipov/llama.cpp` + `dory-arch` + PR #32970 as their
-provenance; the broader port entry R2125613392 remains open because the strict
-top-5 verdict is not a pass.
+* `4934ef6025` - soul selection and inline cap scale with the model window.
+* `51da59f6dc` - ignore SIGTTOU before the TUI runs.
+* `acdab261bf` - truncation envelopes are unmistakably not entries.
