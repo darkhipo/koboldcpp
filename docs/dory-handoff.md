@@ -45,7 +45,7 @@ All measured 2026-11-24 on CPU against the 16-position teacher-forced oracle.
 
 | Measurement | Result |
 |---|---|
-| Strict top-5 SET/ORDER, BF16 control (`num_loops` = 4) | **FAIL**, 3 of 16 positions - order-only differences, max shared-token delta 0.299 |
+| Strict top-5 SET/ORDER, BF16 control (`num_loops` = 4) | **FAIL**, 3 of 16 positions: 3 and 15 are order-only; 5 has a rank-5 set difference (3075 vs 3367) and the argmax flips inside a ~0.008-logprob tie in the reference itself. Max shared-token delta 0.299 |
 | Strict top-5 SET/ORDER, shipped Q5_K_M | **FAIL**, 8 of 16 positions, max delta 1.170 at position 3 |
 | Loop agreement, shipped Q5_K_M | 15/16 against loops = 4, 6/16 against loops = 1 |
 | `--accept-bf16-noise`, BF16 control | **PASS 16/16 printed - NOT final** (see limitation 2) |
@@ -105,6 +105,11 @@ The main entry is 2125613392; it stays open until #2676 merges.
 * Metal sources live in `ggml/src/ggml-metal/`. If the generated kernels are
   removed, regenerate with
   `rm ggml-metal-device-m.o && make ggml-metal-device-m.o LLAMA_METAL=1`.
+* `main` and `llamaserver` are ALWAYS remade (`build-info.h` never exists), and a
+  signalled `make` deletes its target ("Deleting file 'llamaserver'"). That is how
+  the binaries vanished on 2026-11-24, and again on 2026-11-25 when two builders
+  ran in the same tree. Never run two makes there, never start one under a tool
+  with a watchdog, and copy `llamaserver` aside after a successful build.
 * Run long oracle jobs detached, never in a foreground shell. The host is
   routinely at 90%+ swap; gate 8 GB inference runs on swap used <= 16 GB.
 * Never report a build, test or oracle result you did not run. "Queued" is not
