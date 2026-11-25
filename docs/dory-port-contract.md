@@ -209,6 +209,26 @@ Any future "discriminating" prompt must be recorded with the margin between the
 variants it discriminates: a 0.008-logit margin discriminates BF16 from BF16, not
 a 5-bit quantisation.
 
+## SUBSTITUTION BOUND ADDED 2026-11-25 (tightens the relaxed rule above)
+
+The 2026-11-24 relaxation tolerated top-5 SET differences without limit, so a candidate
+could enter the port's list at any probability provided the shared tokens stayed within
+0.5. That is now bounded: an unshared candidate is acceptable only as a BOUNDARY SWAP,
+meaning (a) the number of entrants equals the number of leavers, and (b) every entrant
+sits within the shared-token tolerance (0.5) of the logprob of a candidate that left the
+other list. No second threshold is introduced: the bound is the acceptance's own
+tolerance, and it reads identically against a logits reference because
+logprob_i - logprob_j == logit_i - logit_j.
+
+Calibration on the saved measurements: the BF16 run still passes all 16 positions, and
+position 5 is now reported explicitly as id 3367 paired 0.038 logprob away from id 3075
+instead of being silently tolerated. The Q5_K_M run still fails, and now also fails the
+substitutions that have no counterpart within 0.5, which is the intended behaviour for a
+measurement that is informational and never claimed as a pass.
+
+Implemented in `scripts/dory_oracle_check.py` (30 tests); the rule lives in
+`bf16_unshared_candidates()`.
+
 ## Four places the reference beats the earlier summary in this file
 
 1. The interpolation base is the **NORMALISED** input: `hidden_states =
